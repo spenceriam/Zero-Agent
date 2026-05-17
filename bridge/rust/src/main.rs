@@ -62,23 +62,14 @@ fn handle_line(line: &str) -> String {
         "extension.list" => extension_list(&id, line),
         "extension.read" => extension_read(&id, line),
         "extension.write" => extension_write(&id, line),
-        "models.discover" => {
-            let provider = match json_field(line, "provider") {
-                Ok(Some(provider)) => provider,
-                Ok(None) => "unknown".to_string(),
-                Err(_) => return error_response(&id, "invalid bridge request"),
-            };
-            format!(
-                "{{\"id\":{},\"ok\":true,\"event\":\"models\",\"output\":{{\"provider\":{},\"transport\":\"stub\",\"models\":[]}}}}",
-                json_string(&id),
-                json_string(&provider)
-            )
-        }
+        "models.discover" => models_discover(&id, line),
         "telegram.poll" => telegram_poll(&id, line),
         "telegram.send" => telegram_send(&id, line),
-        "http.request" | "http.stream_sse" | "process.spawn" => {
+        "http.request" => http_request(&id, line),
+        "http.stream_sse" => http_stream_sse(&id, line),
+        "process.spawn" => {
             format!(
-                "{{\"id\":{},\"ok\":false,\"event\":\"not_implemented\",\"output\":{{\"op\":{}}},\"error\":\"bridge operation is not implemented yet\"}}",
+                "{{\"id\":{},\"ok\":false,\"event\":\"not_implemented\",\"output\":{{\"op\":{}}},\"error\":\"process.spawn is not implemented yet\"}}",
                 json_string(&id),
                 json_string(&op)
             )
@@ -610,11 +601,39 @@ fn extension_write(id: &str, line: &str) -> String {
     }
 }
 
-fn telegram_poll(id: &str, _line: &str) -> String {
-    // Stub: real implementation will call Telegram Bot API
+fn telegram_poll(id: &str, line: &str) -> String {
+    let token = match json_field(line, "token") {
+        Ok(Some(value)) => value,
+        Ok(None) => return error_response(id, "missing token"),
+        Err(_) => return error_response(id, "invalid bridge request"),
+    };
+    let offset = match json_field(line, "offset") {
+        Ok(Some(value)) => value,
+        Ok(None) => "0".to_string(),
+        Err(_) => return error_response(id, "invalid bridge request"),
+    };
+
+    let url = format!("https://api.telegram.org/bot{}/getUpdates?offset={}", token, offset);
+
+    let output = match std::process::Command::new("curl")
+        .arg("-s").arg("-S")
+        .arg(&url)
+        .output()
+    {
+        Ok(output) => output,
+        Err(error) => return error_response(id, &format!("failed to call Telegram API: {error}")),
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        return error_response(id, &format!("telegram poll failed: {stderr}"));
+    }
+
     format!(
-        "{{\"id\":{},\"ok\":true,\"event\":\"telegram.poll\",\"output\":{{\"updates\":[]}}}}",
-        json_string(id)
+        "{{\"id\":{},\"ok\":true,\"event\":\"telegram.poll\",\"output\":{{\"response\":{}}}}}",
+        json_string(id),
+        json_string(&stdout)
     )
 }
 
@@ -629,14 +648,353 @@ fn telegram_send(id: &str, line: &str) -> String {
         Ok(None) => return error_response(id, "missing text"),
         Err(_) => return error_response(id, "invalid bridge request"),
     };
+    let token = match json_field(line, "token") {
+        Ok(Some(value)) => value,
+        Ok(None) => return error_response(id, "missing token"),
+        Err(_) => return error_response(id, "invalid bridge request"),
+    };
 
-    // Stub: real implementation will call Telegram Bot API
+    let url = format!("https://api.telegram.org/bot{}/sendMessage", token);
+    let body = format!("{{\"chat_id\":\"{}\",\"text\":\"{}\"}}", chat_id, text.replace('"', "\\\""));
+
+    let output = match std::process::Command::new("curl")
+        .arg("-s").arg("-S")
+        .arg("-X").arg("POST")
+        .arg("-H").arg("Content-Type: application/json")
+        .arg("-d").arg(&body)
+        .arg(&url)
+        .output()
+    {
+        Ok(output) => output,
+        Err(error) => return error_response(id, &format!("failed to call Telegram API: {error}")),
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        return error_response(id, &format!("telegram send failed: {stderr}"));
+    }
+
     format!(
-        "{{\"id\":{},\"ok\":true,\"event\":\"telegram.sent\",\"output\":{{\"chat_id\":{},\"text\":{}}}}}",
+        "{{\"id\":{},\"ok\":true,\"event\":\"telegram.sent\",\"output\":{{\"chat_id\":{},\"response\":{}}}}}",
         json_string(id),
         json_string(&chat_id),
-        json_string(&text)
+        json_string(&stdout)
     )
+}
+
+fn http_request(id: &str, line: &str) -> String {
+    let url = match json_field(line, "url") {
+        Ok(Some(value)) => value,
+        Ok(None) => return error_response(id, "missing url"),
+        Err(_) => return error_response(id, "invalid bridge request"),
+    };
+    let method = match json_field(line, "method") {
+        Ok(Some(value)) => value,
+        Ok(None) => "GET".to_string(),
+        Err(_) => return error_response(id, "invalid bridge request"),
+    };
+    let headers = match json_field(line, "headers") {
+        Ok(Some(value)) => value,
+        Ok(None) => String::new(),
+        Err(_) => return error_response(id, "invalid bridge request"),
+    };
+    let body = match json_field(line, "body") {
+        Ok(Some(value)) => value,
+        Ok(None) => String::new(),
+        Err(_) => return error_response(id, "invalid bridge request"),
+    };
+
+    let mut cmd = std::process::Command::new("curl");
+    cmd.arg("-s").arg("-S").arg("-w").arg("\n%{http_code}");
+    cmd.arg("-X").arg(&method);
+
+    // Parse headers from JSON string like "{\"key\":\"value\"}"
+    if !headers.is_empty() {
+        let mut h = headers.as_str();
+        while let Some(key_start) = h.find('"') {
+            h = &h[key_start + 1..];
+            let Some(key_end) = h.find('"') else { break };
+            let key = &h[..key_end];
+            h = &h[key_end + 1..];
+            let Some(colon) = h.find(':') else { break };
+            h = &h[colon + 1..];
+            let Some(val_start) = h.find('"') else { break };
+            h = &h[val_start + 1..];
+            let Some(val_end) = h.find('"') else { break };
+            let val = &h[..val_end];
+            h = &h[val_end + 1..];
+            cmd.arg("-H").arg(format!("{key}: {val}"));
+        }
+    }
+
+    if !body.is_empty() {
+        cmd.arg("-d").arg(&body);
+    }
+
+    cmd.arg(&url);
+
+    let output = match cmd.output() {
+        Ok(output) => output,
+        Err(error) => return error_response(id, &format!("failed to run curl: {error}")),
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+    if !output.status.success() {
+        return error_response(id, &format!("http request failed: {stderr}"));
+    }
+
+    // Split status code from body (last line)
+    let (body_str, status_code) = if let Some(last_nl) = stdout.rfind('\n') {
+        let code_str = stdout[last_nl + 1..].trim();
+        let code = code_str.parse::<i64>().unwrap_or(0);
+        (stdout[..last_nl].to_string(), code)
+    } else {
+        (stdout, 0)
+    };
+
+    format!(
+        "{{\"id\":{},\"ok\":true,\"event\":\"http.response\",\"output\":{{\"status\":{},\"body\":{}}}}}",
+        json_string(id),
+        status_code,
+        json_string(&body_str)
+    )
+}
+
+fn http_stream_sse(id: &str, line: &str) -> String {
+    let url = match json_field(line, "url") {
+        Ok(Some(value)) => value,
+        Ok(None) => return error_response(id, "missing url"),
+        Err(_) => return error_response(id, "invalid bridge request"),
+    };
+    let method = match json_field(line, "method") {
+        Ok(Some(value)) => value,
+        Ok(None) => "POST".to_string(),
+        Err(_) => return error_response(id, "invalid bridge request"),
+    };
+    let headers = match json_field(line, "headers") {
+        Ok(Some(value)) => value,
+        Ok(None) => String::new(),
+        Err(_) => return error_response(id, "invalid bridge request"),
+    };
+    let body = match json_field(line, "body") {
+        Ok(Some(value)) => value,
+        Ok(None) => String::new(),
+        Err(_) => return error_response(id, "invalid bridge request"),
+    };
+
+    let mut cmd = std::process::Command::new("curl");
+    cmd.arg("-s").arg("-S").arg("-N").arg("--no-buffer");
+    cmd.arg("-X").arg(&method);
+    cmd.arg("-H").arg("Accept: text/event-stream");
+
+    if !headers.is_empty() {
+        let mut h = headers.as_str();
+        while let Some(key_start) = h.find('"') {
+            h = &h[key_start + 1..];
+            let Some(key_end) = h.find('"') else { break };
+            let key = &h[..key_end];
+            h = &h[key_end + 1..];
+            let Some(colon) = h.find(':') else { break };
+            h = &h[colon + 1..];
+            let Some(val_start) = h.find('"') else { break };
+            h = &h[val_start + 1..];
+            let Some(val_end) = h.find('"') else { break };
+            let val = &h[..val_end];
+            h = &h[val_end + 1..];
+            cmd.arg("-H").arg(format!("{key}: {val}"));
+        }
+    }
+
+    if !body.is_empty() {
+        cmd.arg("-d").arg(&body);
+    }
+
+    cmd.arg(&url);
+
+    let output = match cmd.output() {
+        Ok(output) => output,
+        Err(error) => return error_response(id, &format!("failed to run curl: {error}")),
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+    if !output.status.success() {
+        return error_response(id, &format!("sse stream failed: {stderr}"));
+    }
+
+    // Parse SSE events from the response, extracting text content
+    let mut events = Vec::new();
+    for line in stdout.lines() {
+        let line = line.trim();
+        if let Some(data) = line.strip_prefix("data: ")
+            && data != "[DONE]"
+        {
+            let text = extract_sse_text(data);
+            if !text.is_empty() {
+                events.push(text);
+            }
+        }
+    }
+
+    let mut json_events = String::from("[");
+    for (i, evt) in events.iter().enumerate() {
+        if i > 0 {
+            json_events.push(',');
+        }
+        json_events.push_str(json_string(evt).as_str());
+    }
+    json_events.push(']');
+
+    format!(
+        "{{\"id\":{},\"ok\":true,\"event\":\"http.sse\",\"output\":{{\"events\":{}}}}}",
+        json_string(id),
+        json_events
+    )
+}
+
+fn models_discover(id: &str, line: &str) -> String {
+    let provider = match json_field(line, "provider") {
+        Ok(Some(provider)) => provider,
+        Ok(None) => "unknown".to_string(),
+        Err(_) => return error_response(id, "invalid bridge request"),
+    };
+    let api_key = match json_field(line, "api_key") {
+        Ok(Some(key)) => key,
+        Ok(None) => String::new(),
+        Err(_) => return error_response(id, "invalid bridge request"),
+    };
+
+    let url = match provider.as_str() {
+        "openrouter" => "https://openrouter.ai/api/v1/models",
+        "openai" => "https://api.openai.com/v1/models",
+        _ => {
+            return format!(
+                "{{\"id\":{},\"ok\":true,\"event\":\"models\",\"output\":{{\"provider\":{},\"transport\":\"none\",\"models\":[]}}}}",
+                json_string(id),
+                json_string(&provider)
+            );
+        }
+    };
+
+    let mut cmd = std::process::Command::new("curl");
+    cmd.arg("-s").arg("-S");
+    if !api_key.is_empty() {
+        cmd.arg("-H").arg(format!("Authorization: Bearer {}", api_key));
+    }
+    cmd.arg(url);
+
+    let output = match cmd.output() {
+        Ok(output) => output,
+        Err(error) => return error_response(id, &format!("failed to fetch models: {error}")),
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        return error_response(id, &format!("model discovery failed: {stderr}"));
+    }
+
+    format!(
+        "{{\"id\":{},\"ok\":true,\"event\":\"models\",\"output\":{{\"provider\":{},\"transport\":\"http\",\"response\":{}}}}}",
+        json_string(id),
+        json_string(&provider),
+        json_string(&stdout)
+    )
+}
+
+/// Extract text content from SSE data (supports Anthropic and OpenAI formats)
+fn extract_sse_text(data: &str) -> String {
+    // Anthropic format: {"type":"content_block_delta","delta":{"type":"text_delta","text":"..."}}
+    if let Some(text) = extract_json_nested_field(data, &["delta", "text"]) {
+        return text;
+    }
+    // OpenAI format: {"choices":[{"delta":{"content":"..."}}]}
+    if let Some(text) = extract_json_nested_field(data, &["choices", "0", "delta", "content"]) {
+        return text;
+    }
+    String::new()
+}
+
+/// Extract a nested JSON field by walking a path of keys
+fn extract_json_nested_field(data: &str, path: &[&str]) -> Option<String> {
+    let mut current = data;
+    for (i, key) in path.iter().enumerate() {
+        // Find the key
+        let pattern = format!("\"{key}\"");
+        let start = current.find(&pattern)?;
+        current = &current[start + pattern.len()..];
+        // Skip colon and whitespace
+        let colon = current.find(':')?;
+        current = current[colon + 1..].trim_start();
+        if i == path.len() - 1 {
+            // Last key - extract the value
+            return if let Some(val) = current.strip_prefix('"') {
+                let end = find_unescaped_quote(val)?;
+                Some(val[..end].to_string())
+            } else if current.starts_with('[') || current.starts_with('{') {
+                // For objects/arrays, return the full JSON value
+                let end = find_json_end(current)?;
+                Some(current[..end].to_string())
+            } else {
+                // Number, bool, null
+                let end = current.find(|c: char| c == ',' || c == '}' || c == ']' || c.is_whitespace()).unwrap_or(current.len());
+                Some(current[..end].to_string())
+            };
+        }
+        // Not last key - if it's an object, continue searching inside
+        if current.starts_with('{') {
+            current = &current[1..];
+        } else if current.starts_with('[') {
+            // For arrays, find the next element
+            current = &current[1..];
+        }
+    }
+    None
+}
+
+fn find_unescaped_quote(s: &str) -> Option<usize> {
+    let mut chars = s.char_indices();
+    while let Some((i, ch)) = chars.next() {
+        match ch {
+            '"' => return Some(i),
+            '\\' => { chars.next(); } // skip escaped char
+            _ => {}
+        }
+    }
+    None
+}
+
+fn find_json_end(s: &str) -> Option<usize> {
+    let open = s.as_bytes()[0];
+    let close = if open == b'{' { b'}' } else { b']' };
+    let mut depth = 0;
+    let mut in_string = false;
+    let mut prev = 0u8;
+    for (i, &b) in s.as_bytes().iter().enumerate() {
+        if in_string {
+            if b == b'"' && prev != b'\\' {
+                in_string = false;
+            }
+        } else {
+            match b {
+                b'"' => in_string = true,
+                b if b == open => depth += 1,
+                b if b == close => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(i + 1);
+                    }
+                }
+                _ => {}
+            }
+        }
+        prev = b;
+    }
+    None
 }
 
 fn error_response(id: &str, message: &str) -> String {

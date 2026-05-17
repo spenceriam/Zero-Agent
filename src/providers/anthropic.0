@@ -55,8 +55,8 @@ pub fun toolSchema(name: String, description: String, schema: String) -> Anthrop
     }
 }
 
-pub fun parseStreamEvent(event_type: String, data: String) -> AgentEvent {
-    return assistantText(data)
+pub fun parseStreamEvent(text: String) -> AgentEvent {
+    return providerText(text)
 }
 
 pub fun thinkingEvent(text: String) -> AgentEvent {

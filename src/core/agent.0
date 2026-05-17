@@ -1,5 +1,52 @@
+use core.config
 use core.events
+use core.session
+use core.types
+use providers.registry
+use tools.registry
+
+pub shape AgentState {
+    session_id: String,
+    provider_id: String,
+    model: String,
+    messages: String,
+    is_running: Bool,
+}
+
+pub fun newAgentState(session_id: String, provider: String, model: String) -> AgentState {
+    return AgentState {
+        session_id: session_id,
+        provider_id: provider,
+        model: model,
+        messages: "",
+        is_running: false,
+    }
+}
+
+pub fun handleUserInput(text: String, source: InterfaceKind) -> AgentEvent {
+    return userInput(text, source)
+}
+
+pub fun processProviderText(text: String) -> AgentEvent {
+    return providerText(text)
+}
+
+pub fun processToolCall(name: String, input: String) -> AgentEvent {
+    return toolCall(name, input)
+}
+
+pub fun processToolResult(name: String, output: String) -> AgentEvent {
+    return toolResult(name, output)
+}
+
+pub fun shouldRequireApproval(tool: tools.Tool) -> Bool {
+    return tools.needsApproval(tool)
+}
+
+pub fun agentReady() -> AgentEvent {
+    return status("Zero-Agent ready")
+}
 
 pub fun startMessage() -> AgentEvent {
-    return status("Zero-Agent core loop ready")
+    return agentReady()
 }

@@ -58,8 +58,8 @@ pub fun toolSchema(name: String, description: String, parameters: String) -> Ope
     }
 }
 
-pub fun parseStreamEvent(data: String) -> AgentEvent {
-    return assistantText(data)
+pub fun parseStreamEvent(text: String) -> AgentEvent {
+    return providerText(text)
 }
 
 pub fun textDeltaEvent(text: String) -> AgentEvent {
