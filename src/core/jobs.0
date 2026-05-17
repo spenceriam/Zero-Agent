@@ -1,13 +1,60 @@
+pub enum JobStatus {
+    Queued,
+    Running,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
 pub shape Job {
     id: String,
     prompt: String,
+    status: JobStatus,
     enabled: Bool,
+    session_id: String,
+    result: String,
 }
 
 pub fun newJob(id: String, prompt: String) -> Job {
     return Job {
         id: id,
         prompt: prompt,
+        status: JobStatus.Queued,
         enabled: true,
+        session_id: "",
+        result: "",
+    }
+}
+
+pub fun runningJob(id: String, prompt: String, session_id: String) -> Job {
+    return Job {
+        id: id,
+        prompt: prompt,
+        status: JobStatus.Running,
+        enabled: true,
+        session_id: session_id,
+        result: "",
+    }
+}
+
+pub fun completedJob(id: String, prompt: String, result: String) -> Job {
+    return Job {
+        id: id,
+        prompt: prompt,
+        status: JobStatus.Completed,
+        enabled: true,
+        session_id: "",
+        result: result,
+    }
+}
+
+pub fun failedJob(id: String, prompt: String, error: String) -> Job {
+    return Job {
+        id: id,
+        prompt: prompt,
+        status: JobStatus.Failed,
+        enabled: true,
+        session_id: "",
+        result: error,
     }
 }
