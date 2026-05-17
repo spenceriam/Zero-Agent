@@ -59,6 +59,9 @@ fn handle_line(line: &str) -> String {
         "shell.run" => shell_run(&id, line),
         "memory.save" => memory_save(&id, line),
         "memory.list" => memory_list(&id, line),
+        "extension.list" => extension_list(&id, line),
+        "extension.read" => extension_read(&id, line),
+        "extension.write" => extension_write(&id, line),
         "models.discover" => {
             let provider = match json_field(line, "provider") {
                 Ok(Some(provider)) => provider,
@@ -510,6 +513,98 @@ fn memory_list(id: &str, line: &str) -> String {
             json_string(id),
             json_string(&path)
         ),
+    }
+}
+
+fn extension_list(id: &str, line: &str) -> String {
+    let dir = match json_field(line, "dir") {
+        Ok(Some(value)) => value,
+        Ok(None) => return error_response(id, "missing dir"),
+        Err(_) => return error_response(id, "invalid bridge request"),
+    };
+
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(_) => {
+            return format!(
+                "{{\"id\":{},\"ok\":true,\"event\":\"extension.list\",\"output\":{{\"dir\":{},\"extensions\":[]}}}}",
+                json_string(id),
+                json_string(&dir)
+            );
+        }
+    };
+
+    let mut extensions = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir()
+            && let Some(name) = path.file_name().and_then(|n| n.to_str())
+        {
+            extensions.push(name.to_string());
+        }
+    }
+
+    let mut json_list = String::from("[");
+    for (i, ext) in extensions.iter().enumerate() {
+        if i > 0 {
+            json_list.push(',');
+        }
+        json_list.push_str(json_string(ext).as_str());
+    }
+    json_list.push(']');
+
+    format!(
+        "{{\"id\":{},\"ok\":true,\"event\":\"extension.list\",\"output\":{{\"dir\":{},\"extensions\":{}}}}}",
+        json_string(id),
+        json_string(&dir),
+        json_list
+    )
+}
+
+fn extension_read(id: &str, line: &str) -> String {
+    let path = match json_field(line, "path") {
+        Ok(Some(value)) => value,
+        Ok(None) => return error_response(id, "missing path"),
+        Err(_) => return error_response(id, "invalid bridge request"),
+    };
+
+    match std::fs::read_to_string(&path) {
+        Ok(contents) => format!(
+            "{{\"id\":{},\"ok\":true,\"event\":\"extension.read\",\"output\":{{\"path\":{},\"manifest\":{}}}}}",
+            json_string(id),
+            json_string(&path),
+            json_string(&contents)
+        ),
+        Err(error) => error_response(id, &format!("failed to read extension manifest: {error}")),
+    }
+}
+
+fn extension_write(id: &str, line: &str) -> String {
+    let path = match json_field(line, "path") {
+        Ok(Some(value)) => value,
+        Ok(None) => return error_response(id, "missing path"),
+        Err(_) => return error_response(id, "invalid bridge request"),
+    };
+    let contents = match json_field(line, "contents") {
+        Ok(Some(value)) => value,
+        Ok(None) => return error_response(id, "missing contents"),
+        Err(_) => return error_response(id, "invalid bridge request"),
+    };
+
+    if let Some(parent) = std::path::Path::new(&path).parent()
+        && !parent.as_os_str().is_empty()
+        && let Err(error) = std::fs::create_dir_all(parent)
+    {
+        return error_response(id, &format!("failed to create extension directory: {error}"));
+    }
+
+    match std::fs::write(&path, contents) {
+        Ok(()) => format!(
+            "{{\"id\":{},\"ok\":true,\"event\":\"extension.written\",\"output\":{{\"path\":{}}}}}",
+            json_string(id),
+            json_string(&path)
+        ),
+        Err(error) => error_response(id, &format!("failed to write extension manifest: {error}")),
     }
 }
 
