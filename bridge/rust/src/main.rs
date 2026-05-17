@@ -74,7 +74,9 @@ fn handle_line(line: &str) -> String {
                 json_string(&provider)
             )
         }
-        "http.request" | "http.stream_sse" | "process.spawn" | "telegram.poll" | "telegram.send" => {
+        "telegram.poll" => telegram_poll(&id, line),
+        "telegram.send" => telegram_send(&id, line),
+        "http.request" | "http.stream_sse" | "process.spawn" => {
             format!(
                 "{{\"id\":{},\"ok\":false,\"event\":\"not_implemented\",\"output\":{{\"op\":{}}},\"error\":\"bridge operation is not implemented yet\"}}",
                 json_string(&id),
@@ -606,6 +608,35 @@ fn extension_write(id: &str, line: &str) -> String {
         ),
         Err(error) => error_response(id, &format!("failed to write extension manifest: {error}")),
     }
+}
+
+fn telegram_poll(id: &str, _line: &str) -> String {
+    // Stub: real implementation will call Telegram Bot API
+    format!(
+        "{{\"id\":{},\"ok\":true,\"event\":\"telegram.poll\",\"output\":{{\"updates\":[]}}}}",
+        json_string(id)
+    )
+}
+
+fn telegram_send(id: &str, line: &str) -> String {
+    let chat_id = match json_field(line, "chat_id") {
+        Ok(Some(value)) => value,
+        Ok(None) => return error_response(id, "missing chat_id"),
+        Err(_) => return error_response(id, "invalid bridge request"),
+    };
+    let text = match json_field(line, "text") {
+        Ok(Some(value)) => value,
+        Ok(None) => return error_response(id, "missing text"),
+        Err(_) => return error_response(id, "invalid bridge request"),
+    };
+
+    // Stub: real implementation will call Telegram Bot API
+    format!(
+        "{{\"id\":{},\"ok\":true,\"event\":\"telegram.sent\",\"output\":{{\"chat_id\":{},\"text\":{}}}}}",
+        json_string(id),
+        json_string(&chat_id),
+        json_string(&text)
+    )
 }
 
 fn error_response(id: &str, message: &str) -> String {
