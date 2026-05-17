@@ -1,0 +1,25 @@
+pub shape ProviderCapability {
+    streaming: Bool,
+    tool_calling: Bool,
+    thinking_events: Bool,
+    model_discovery: Bool,
+}
+
+pub shape Provider {
+    id: String,
+    display_name: String,
+    capability: ProviderCapability,
+}
+
+pub fun openRouterProvider() -> Provider {
+    return Provider {
+        id: "openrouter",
+        display_name: "OpenRouter",
+        capability: ProviderCapability {
+            streaming: true,
+            tool_calling: true,
+            thinking_events: false,
+            model_discovery: true,
+        },
+    }
+}

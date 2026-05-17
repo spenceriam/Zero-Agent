@@ -1,0 +1,10 @@
+use core.types
+
+pub fun decisionForRisk(risk: RiskLevel) -> PermissionDecision {
+    match risk {
+        RiskLevel.Safe => return PermissionDecision.Allow,
+        RiskLevel.Mutating => return PermissionDecision.Ask,
+        RiskLevel.Destructive => return PermissionDecision.Ask,
+        RiskLevel.Blocked => return PermissionDecision.Deny,
+    }
+}

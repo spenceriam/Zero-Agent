@@ -1,0 +1,8 @@
+// Zero-Agent entrypoint.
+// The direct Windows backend is intentionally kept primitive-only for now.
+// Core shapes live in modules and will be exercised once the backend supports them
+// or through the Rust bridge boundary.
+
+pub fun main(world: World) -> Void raises {
+    check world.out.write("Zero-Agent core bootstrap ready\n")
+}

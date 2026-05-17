@@ -1,0 +1,13 @@
+pub shape SubAgentRun {
+    id: String,
+    task: String,
+    status: String,
+}
+
+pub fun queuedSubAgent(id: String, task: String) -> SubAgentRun {
+    return SubAgentRun {
+        id: id,
+        task: task,
+        status: "queued",
+    }
+}

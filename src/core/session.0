@@ -1,0 +1,15 @@
+pub shape Session {
+    id: String,
+    title: String,
+    provider: String,
+    model: String,
+}
+
+pub fun newSession(id: String, provider: String, model: String) -> Session {
+    return Session {
+        id: id,
+        title: "New session",
+        provider: provider,
+        model: model,
+    }
+}

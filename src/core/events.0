@@ -1,0 +1,21 @@
+use core.types
+
+pub enum AgentEventKind {
+    UserInput,
+    AssistantText,
+    Thinking,
+    ToolCall,
+    ToolResult,
+    Status,
+    Error,
+    Done,
+}
+
+pub shape AgentEvent {
+    kind: AgentEventKind,
+    text: String,
+}
+
+pub fun status(text: String) -> AgentEvent {
+    return AgentEvent { kind: AgentEventKind.Status, text: text }
+}

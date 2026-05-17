@@ -1,0 +1,13 @@
+pub shape MemoryItem {
+    id: String,
+    kind: String,
+    text: String,
+}
+
+pub fun userMemory(id: String, text: String) -> MemoryItem {
+    return MemoryItem {
+        id: id,
+        kind: "user",
+        text: text,
+    }
+}

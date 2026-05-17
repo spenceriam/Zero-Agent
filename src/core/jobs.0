@@ -1,0 +1,13 @@
+pub shape Job {
+    id: String,
+    prompt: String,
+    enabled: Bool,
+}
+
+pub fun newJob(id: String, prompt: String) -> Job {
+    return Job {
+        id: id,
+        prompt: prompt,
+        enabled: true,
+    }
+}

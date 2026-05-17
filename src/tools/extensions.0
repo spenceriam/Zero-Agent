@@ -1,0 +1,15 @@
+use core.types
+
+pub shape ExtensionManifest {
+    name: String,
+    kind: String,
+    risk: RiskLevel,
+}
+
+pub fun localToolExtension(name: String) -> ExtensionManifest {
+    return ExtensionManifest {
+        name: name,
+        kind: "tool",
+        risk: RiskLevel.Mutating,
+    }
+}

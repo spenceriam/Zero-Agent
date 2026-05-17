@@ -1,0 +1,13 @@
+pub shape TuiLayout {
+    conversation: String,
+    activity: String,
+    input: String,
+}
+
+pub fun defaultLayout() -> TuiLayout {
+    return TuiLayout {
+        conversation: "conversation",
+        activity: "activity",
+        input: "input",
+    }
+}

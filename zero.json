@@ -1,0 +1,35 @@
+{
+  "package": {
+    "name": "zero-agent",
+    "version": "0.0.1",
+    "license": "GPL-3.0",
+    "description": "Hermes-inspired daily-use agent built primarily in Zero"
+  },
+  "targets": {
+    "cli": {
+      "kind": "exe",
+      "main": "src/main.0"
+    }
+  },
+  "profiles": {
+    "dev": {
+      "inherits": "dev"
+    },
+    "release": {
+      "inherits": "small"
+    },
+    "fast": {
+      "inherits": "fast"
+    },
+    "tiny": {
+      "inherits": "tiny"
+    }
+  },
+  "capabilities": {
+    "filesystem": true,
+    "env": true,
+    "process": "bridge-required-until-validated",
+    "network": "bridge-required-until-validated",
+    "terminal": "bridge-required-until-validated"
+  }
+}

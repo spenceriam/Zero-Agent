@@ -1,0 +1,23 @@
+use core.types
+
+pub shape Tool {
+    name: String,
+    description: String,
+    risk: RiskLevel,
+}
+
+pub fun readFileTool() -> Tool {
+    return Tool {
+        name: "read_file",
+        description: "Read a local file",
+        risk: RiskLevel.Safe,
+    }
+}
+
+pub fun shellTool() -> Tool {
+    return Tool {
+        name: "shell",
+        description: "Run a shell command",
+        risk: RiskLevel.Mutating,
+    }
+}

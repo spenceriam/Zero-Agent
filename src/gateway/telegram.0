@@ -1,0 +1,11 @@
+pub shape TelegramCommand {
+    name: String,
+    description: String,
+}
+
+pub fun startCommand() -> TelegramCommand {
+    return TelegramCommand {
+        name: "/start",
+        description: "Start or resume the owner session",
+    }
+}

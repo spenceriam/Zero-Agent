@@ -1,0 +1,27 @@
+# Build artifacts
+zig-out/
+dist/
+target/
+.zero/
+
+# Dependencies
+node_modules/
+
+# Local configuration and secrets
+.env
+.env.*
+*.local.json
+.zero-agent/
+
+# Logs
+*.log
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# OpenClaude local settings
+.openclaude/settings.local.json
+.claude/

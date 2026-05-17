@@ -1,0 +1,13 @@
+pub shape AppConfig {
+    data_dir: String,
+    default_provider: String,
+    default_model: String,
+}
+
+pub fun defaultConfig() -> AppConfig {
+    return AppConfig {
+        data_dir: ".zero-agent",
+        default_provider: "openrouter",
+        default_model: "",
+    }
+}

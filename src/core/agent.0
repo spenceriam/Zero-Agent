@@ -1,0 +1,5 @@
+use core.events
+
+pub fun startMessage() -> AgentEvent {
+    return status("Zero-Agent core loop ready")
+}
