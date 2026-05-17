@@ -56,6 +56,7 @@ fn handle_line(line: &str) -> String {
         "fs.write" => fs_write(&id, line),
         "fs.edit" => fs_edit(&id, line),
         "fs.glob" => fs_glob(&id, line),
+        "shell.run" => shell_run(&id, line),
         "models.discover" => {
             let provider = match json_field(line, "provider") {
                 Ok(Some(provider)) => provider,
@@ -399,6 +400,42 @@ fn fs_glob(id: &str, line: &str) -> String {
         json_string(id),
         json_string(&pattern),
         json_matches
+    )
+}
+
+fn shell_run(id: &str, line: &str) -> String {
+    let command = match json_field(line, "command") {
+        Ok(Some(value)) => value,
+        Ok(None) => return error_response(id, "missing command"),
+        Err(_) => return error_response(id, "invalid bridge request"),
+    };
+
+    let shell = if cfg!(target_os = "windows") {
+        ("cmd", "/C")
+    } else {
+        ("sh", "-c")
+    };
+
+    let output = match std::process::Command::new(shell.0)
+        .arg(shell.1)
+        .arg(&command)
+        .output()
+    {
+        Ok(output) => output,
+        Err(error) => return error_response(id, &format!("failed to run command: {error}")),
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let exit_code = output.status.code().unwrap_or(-1);
+
+    format!(
+        "{{\"id\":{},\"ok\":true,\"event\":\"shell.run\",\"output\":{{\"command\":{},\"exit_code\":{},\"stdout\":{},\"stderr\":{}}}}}",
+        json_string(id),
+        json_string(&command),
+        exit_code,
+        json_string(&stdout),
+        json_string(&stderr)
     )
 }
 
