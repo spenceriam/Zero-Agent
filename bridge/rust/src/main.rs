@@ -52,6 +52,10 @@ fn handle_line(line: &str) -> String {
         "session.append" => session_append(&id, line),
         "session.read" => session_read(&id, line),
         "session.list" => session_list(&id, line),
+        "fs.read" => fs_read(&id, line),
+        "fs.write" => fs_write(&id, line),
+        "fs.edit" => fs_edit(&id, line),
+        "fs.glob" => fs_glob(&id, line),
         "models.discover" => {
             let provider = match json_field(line, "provider") {
                 Ok(Some(provider)) => provider,
@@ -262,6 +266,139 @@ fn session_list(id: &str, line: &str) -> String {
         json_string(id),
         json_string(&dir),
         json_list
+    )
+}
+
+fn fs_read(id: &str, line: &str) -> String {
+    let path = match json_field(line, "path") {
+        Ok(Some(value)) => value,
+        Ok(None) => return error_response(id, "missing path"),
+        Err(_) => return error_response(id, "invalid bridge request"),
+    };
+
+    match std::fs::read_to_string(&path) {
+        Ok(contents) => format!(
+            "{{\"id\":{},\"ok\":true,\"event\":\"fs.read\",\"output\":{{\"path\":{},\"contents\":{}}}}}",
+            json_string(id),
+            json_string(&path),
+            json_string(&contents)
+        ),
+        Err(error) => error_response(id, &format!("failed to read file: {error}")),
+    }
+}
+
+fn fs_write(id: &str, line: &str) -> String {
+    let path = match json_field(line, "path") {
+        Ok(Some(value)) => value,
+        Ok(None) => return error_response(id, "missing path"),
+        Err(_) => return error_response(id, "invalid bridge request"),
+    };
+    let contents = match json_field(line, "contents") {
+        Ok(Some(value)) => value,
+        Ok(None) => return error_response(id, "missing contents"),
+        Err(_) => return error_response(id, "invalid bridge request"),
+    };
+
+    if let Some(parent) = std::path::Path::new(&path).parent()
+        && !parent.as_os_str().is_empty()
+        && let Err(error) = std::fs::create_dir_all(parent)
+    {
+        return error_response(id, &format!("failed to create directory: {error}"));
+    }
+
+    match std::fs::write(&path, contents) {
+        Ok(()) => format!(
+            "{{\"id\":{},\"ok\":true,\"event\":\"fs.written\",\"output\":{{\"path\":{}}}}}",
+            json_string(id),
+            json_string(&path)
+        ),
+        Err(error) => error_response(id, &format!("failed to write file: {error}")),
+    }
+}
+
+fn fs_edit(id: &str, line: &str) -> String {
+    let path = match json_field(line, "path") {
+        Ok(Some(value)) => value,
+        Ok(None) => return error_response(id, "missing path"),
+        Err(_) => return error_response(id, "invalid bridge request"),
+    };
+    let old_string = match json_field(line, "old_string") {
+        Ok(Some(value)) => value,
+        Ok(None) => return error_response(id, "missing old_string"),
+        Err(_) => return error_response(id, "invalid bridge request"),
+    };
+    let new_string = match json_field(line, "new_string") {
+        Ok(Some(value)) => value,
+        Ok(None) => return error_response(id, "missing new_string"),
+        Err(_) => return error_response(id, "invalid bridge request"),
+    };
+
+    let contents = match std::fs::read_to_string(&path) {
+        Ok(contents) => contents,
+        Err(error) => return error_response(id, &format!("failed to read file: {error}")),
+    };
+
+    let count = contents.matches(&old_string).count();
+    if count == 0 {
+        return error_response(id, "old_string not found in file");
+    }
+    if count > 1 {
+        return error_response(id, "old_string matches multiple times; provide more context");
+    }
+
+    let new_contents = contents.replacen(&old_string, &new_string, 1);
+    match std::fs::write(&path, &new_contents) {
+        Ok(()) => format!(
+            "{{\"id\":{},\"ok\":true,\"event\":\"fs.edited\",\"output\":{{\"path\":{}}}}}",
+            json_string(id),
+            json_string(&path)
+        ),
+        Err(error) => error_response(id, &format!("failed to write file: {error}")),
+    }
+}
+
+fn fs_glob(id: &str, line: &str) -> String {
+    let pattern = match json_field(line, "pattern") {
+        Ok(Some(value)) => value,
+        Ok(None) => return error_response(id, "missing pattern"),
+        Err(_) => return error_response(id, "invalid bridge request"),
+    };
+
+    let root = match json_field(line, "root") {
+        Ok(Some(value)) => value,
+        Ok(None) => ".".to_string(),
+        Err(_) => return error_response(id, "invalid bridge request"),
+    };
+
+    let glob_pattern = if root == "." {
+        pattern.clone()
+    } else {
+        format!("{}/{}", root.trim_end_matches('/'), pattern)
+    };
+
+    let mut matches = Vec::new();
+    if let Ok(paths) = glob::glob(&glob_pattern) {
+        for path in paths.flatten() {
+            if let Some(path_str) = path.to_str() {
+                matches.push(path_str.to_string());
+            }
+        }
+    }
+
+    let mut json_matches = String::from("[");
+    for (i, m) in matches.iter().enumerate() {
+        if i > 0 {
+            json_matches.push(',');
+        }
+        json_matches.push_str(json_string(m).as_str());
+    }
+    json_matches.push(']');
+
+    format!(
+        "{{\"id\":{},\"ok\":true,\"event\":\"fs.glob\",\"output\":{{\"pattern\":{},\"matches\":{}}}}}",
+        json_string(id),
+        json_string(&pattern),
+        json_matches
     )
 }
 
