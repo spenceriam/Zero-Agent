@@ -63,8 +63,13 @@ fn handle_line(line: &str) -> String {
         "extension.read" => extension_read(&id, line),
         "extension.write" => extension_write(&id, line),
         "models.discover" => models_discover(&id, line),
+        "setup.run" => setup_run(&id),
+        "setup.save" => setup_save(&id, line),
+        "agent.run" => agent_run(&id, line),
+        "agent.tool" => agent_tool(&id, line),
         "telegram.poll" => telegram_poll(&id, line),
         "telegram.send" => telegram_send(&id, line),
+        "telegram.loop" => telegram_loop(&id, line),
         "http.request" => http_request(&id, line),
         "http.stream_sse" => http_stream_sse(&id, line),
         "process.spawn" => {
@@ -79,7 +84,7 @@ fn handle_line(line: &str) -> String {
 }
 
 fn default_config_json() -> &'static str {
-    "{\"data_dir\":\".zero-agent\",\"default_provider\":\"openrouter\",\"default_model\":\"\",\"tool_policy\":{\"allow_safe_without_prompt\":true,\"ask_before_mutating\":true,\"ask_before_destructive\":true}}"
+    "{\"data_dir\":\".zero-agent\",\"default_provider\":\"openrouter\",\"default_model\":\"\",\"api_key_env\":\"\",\"telegram\":{\"bot_token\":\"\",\"allowed_users\":\"\"},\"tool_policy\":{\"allow_safe_without_prompt\":true,\"ask_before_mutating\":true,\"ask_before_destructive\":true}}"
 }
 
 fn validate_config(id: &str, line: &str) -> String {
@@ -683,6 +688,281 @@ fn telegram_send(id: &str, line: &str) -> String {
     )
 }
 
+fn telegram_loop(id: &str, line: &str) -> String {
+    let token = match json_field(line, "token") {
+        Ok(Some(t)) => t,
+        Ok(None) => return error_response(id, "missing token"),
+        Err(_) => return error_response(id, "invalid bridge request"),
+    };
+    let allowed_users = match json_field(line, "allowed_users") {
+        Ok(Some(u)) => u,
+        Ok(None) => String::new(),
+        Err(_) => return error_response(id, "invalid bridge request"),
+    };
+    let api_key = match json_field(line, "api_key") {
+        Ok(Some(k)) => k,
+        Ok(None) => String::new(),
+        Err(_) => return error_response(id, "invalid bridge request"),
+    };
+    let model = match json_field(line, "model") {
+        Ok(Some(m)) => m,
+        Ok(None) => "anthropic/claude-sonnet-4".to_string(),
+        Err(_) => return error_response(id, "invalid bridge request"),
+    };
+    let provider = match json_field(line, "provider") {
+        Ok(Some(p)) => p,
+        Ok(None) => "openrouter".to_string(),
+        Err(_) => return error_response(id, "invalid bridge request"),
+    };
+    let session_dir = match json_field(line, "session_dir") {
+        Ok(Some(d)) => d,
+        Ok(None) => ".zero-agent/sessions".to_string(),
+        Err(_) => return error_response(id, "invalid bridge request"),
+    };
+
+    let mut offset: i64 = 0;
+    let mut updates_processed = 0;
+
+    loop {
+        // Poll for updates
+        let poll_url = format!(
+            "https://api.telegram.org/bot{}/getUpdates?offset={}&timeout=30",
+            token, offset
+        );
+
+        let output = match std::process::Command::new("curl")
+            .arg("-s").arg("-S")
+            .arg("--max-time").arg("35")
+            .arg(&poll_url)
+            .output()
+        {
+            Ok(output) => output,
+            Err(error) => {
+                eprintln!("telegram poll error: {error}");
+                std::thread::sleep(std::time::Duration::from_secs(5));
+                continue;
+            }
+        };
+
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        if !output.status.success() {
+            eprintln!("telegram poll failed: {}", String::from_utf8_lossy(&output.stderr));
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            continue;
+        }
+
+        // Parse updates - look for "update_id" and "message" fields
+        let mut pos = 0;
+        while let Some(update_start) = stdout[pos..].find("\"update_id\":") {
+            let abs_pos = pos + update_start;
+            // Extract update_id
+            let after_key = &stdout[abs_pos + 12..];
+            let update_id_end = after_key.find(|c: char| !c.is_ascii_digit()).unwrap_or(after_key.len());
+            let update_id: i64 = after_key[..update_id_end].trim().parse().unwrap_or(0);
+
+            if update_id >= offset {
+                offset = update_id + 1;
+            }
+
+            // Extract message text
+            let msg_start = stdout[abs_pos..].find("\"text\":");
+            let chat_id_start = stdout[abs_pos..].find("\"chat\":{").and_then(|ci| {
+                stdout[abs_pos + ci..].find("\"id\":")
+            });
+            let user_id_start = stdout[abs_pos..].find("\"from\":{").and_then(|ui| {
+                stdout[abs_pos + ui..].find("\"id\":")
+            });
+
+            if let (Some(msg_off), Some(chat_off)) = (msg_start, chat_id_start) {
+                let text_abs = abs_pos + msg_off;
+                let chat_abs = abs_pos + chat_off;
+
+                // Extract text value
+                let text_after = &stdout[text_abs + 7..];
+                let text_val = if let Some(stripped) = text_after.strip_prefix('"') {
+                    let val_end = stripped.find('"').unwrap_or(stripped.len());
+                    stripped[..val_end].to_string()
+                } else {
+                    String::new()
+                };
+
+                // Extract chat_id
+                let chat_after = &stdout[chat_abs..];
+                let chat_id_val = if let Some(cid_start) = chat_after.find("\"id\":") {
+                    let cid_after = &chat_after[cid_start + 5..];
+                    let cid_end = cid_after.find(|c: char| !c.is_ascii_digit() && c != '-').unwrap_or(cid_after.len());
+                    cid_after[..cid_end].trim().to_string()
+                } else {
+                    String::new()
+                };
+
+                // Extract user_id for auth check
+                let user_id_val = if let Some(uid_off) = user_id_start {
+                    let uid_abs = abs_pos + uid_off;
+                    let uid_after = &stdout[uid_abs..];
+                    if let Some(uid_start) = uid_after.find("\"id\":") {
+                        let uid_val_after = &uid_after[uid_start + 5..];
+                        let uid_end = uid_val_after.find(|c: char| !c.is_ascii_digit()).unwrap_or(uid_val_after.len());
+                        uid_val_after[..uid_end].trim().to_string()
+                    } else {
+                        String::new()
+                    }
+                } else {
+                    String::new()
+                };
+
+                // Auth check
+                if !allowed_users.is_empty() && !user_id_val.is_empty()
+                    && !allowed_users.contains(&user_id_val) {
+                    eprintln!("telegram: unauthorized user {user_id_val}");
+                    pos = abs_pos + 1;
+                    continue;
+                }
+
+                // Handle commands
+                if text_val.starts_with('/') {
+                    let cmd_response = match text_val.split_whitespace().next().unwrap_or("") {
+                        "/start" => "Welcome to Zero-Agent! Send me a message to get started.",
+                        "/help" => "Available commands:\n/start - Start session\n/help - Show help\n/status - Show status",
+                        "/status" => "Zero-Agent is running.",
+                        _ => "Unknown command. Type /help for available commands.",
+                    };
+                    let _ = send_telegram_message(&token, &chat_id_val, cmd_response);
+                } else if !text_val.is_empty() && !chat_id_val.is_empty() {
+                    // Send typing indicator
+                    let _ = send_telegram_action(&token, &chat_id_val, "typing");
+
+                    // Call agent.run
+                    let session_path = format!("{}/{}.jsonl", session_dir, chat_id_val);
+                    let agent_line = format!(
+                        "{{\"id\":\"{}\",\"op\":\"agent.run\",\"provider\":{},\"model\":{},\"api_key\":{},\"prompt\":{},\"session_path\":{}}}",
+                        id,
+                        json_string(&provider),
+                        json_string(&model),
+                        json_string(&api_key),
+                        json_string(&text_val),
+                        json_string(&session_path)
+                    );
+                    let agent_response = agent_run(id, &agent_line);
+
+                    // Extract text from agent response
+                    let response_text = extract_agent_response_text(&agent_response);
+
+                    if !response_text.is_empty() {
+                        // Chunk and send response
+                        let chunks = chunk_message(&response_text, 4096);
+                        for chunk in chunks {
+                            let _ = send_telegram_message(&token, &chat_id_val, &chunk);
+                        }
+                    }
+                }
+
+                updates_processed += 1;
+            }
+
+            pos = abs_pos + 1;
+        }
+
+        // Safety: exit after processing some updates in test mode
+        if updates_processed > 0 && std::env::var("TELEGRAM_TEST_MODE").is_ok() {
+            break;
+        }
+    }
+
+    format!(
+        "{{\"id\":{},\"ok\":true,\"event\":\"telegram.loop\",\"output\":{{\"updates_processed\":{}}}}}",
+        json_string(id),
+        updates_processed
+    )
+}
+
+fn send_telegram_message(token: &str, chat_id: &str, text: &str) -> Result<(), String> {
+    let url = format!("https://api.telegram.org/bot{}/sendMessage", token);
+    let body = format!("{{\"chat_id\":\"{}\",\"text\":\"{}\"}}", chat_id, text.replace('"', "\\\"").replace('\n', "\\n"));
+
+    let output = std::process::Command::new("curl")
+        .arg("-s").arg("-S")
+        .arg("-X").arg("POST")
+        .arg("-H").arg("Content-Type: application/json")
+        .arg("-d").arg(&body)
+        .arg(&url)
+        .output()
+        .map_err(|e| format!("curl error: {e}"))?;
+
+    if !output.status.success() {
+        return Err(format!("send failed: {}", String::from_utf8_lossy(&output.stderr)));
+    }
+    Ok(())
+}
+
+fn send_telegram_action(token: &str, chat_id: &str, action: &str) -> Result<(), String> {
+    let url = format!("https://api.telegram.org/bot{}/sendChatAction", token);
+    let body = format!("{{\"chat_id\":\"{}\",\"action\":\"{}\"}}", chat_id, action);
+
+    let output = std::process::Command::new("curl")
+        .arg("-s").arg("-S")
+        .arg("-X").arg("POST")
+        .arg("-H").arg("Content-Type: application/json")
+        .arg("-d").arg(&body)
+        .arg(&url)
+        .output()
+        .map_err(|e| format!("curl error: {e}"))?;
+
+    if !output.status.success() {
+        return Err(format!("action failed: {}", String::from_utf8_lossy(&output.stderr)));
+    }
+    Ok(())
+}
+
+fn extract_agent_response_text(response: &str) -> String {
+    // Extract text from events array in agent.run response
+    let mut text = String::new();
+    let mut pos = 0;
+    while let Some(kind_start) = response[pos..].find("\"kind\":\"text\"") {
+        let abs = pos + kind_start;
+        if let Some(text_start) = response[abs..].find("\"text\":") {
+            let text_abs = abs + text_start + 7;
+            if response[text_abs..].starts_with('"') {
+                let val_end = response[text_abs + 1..].find('"').unwrap_or(0);
+                text.push_str(&response[text_abs + 1..text_abs + 1 + val_end]);
+            }
+        }
+        pos = abs + 1;
+    }
+    text
+}
+
+fn chunk_message(text: &str, max_len: usize) -> Vec<String> {
+    if text.len() <= max_len {
+        return vec![text.to_string()];
+    }
+
+    let mut chunks = Vec::new();
+    let mut remaining = text;
+
+    while remaining.len() > max_len {
+        // Try to split at paragraph boundary
+        let split_at = if let Some(para_pos) = remaining[..max_len].rfind("\n\n") {
+            para_pos + 2
+        } else if let Some(newline_pos) = remaining[..max_len].rfind('\n') {
+            newline_pos + 1
+        } else if let Some(space_pos) = remaining[..max_len].rfind(' ') {
+            space_pos + 1
+        } else {
+            max_len
+        };
+
+        chunks.push(remaining[..split_at].to_string());
+        remaining = &remaining[split_at..];
+    }
+
+    if !remaining.is_empty() {
+        chunks.push(remaining.to_string());
+    }
+
+    chunks
+}
+
 fn http_request(id: &str, line: &str) -> String {
     let url = match json_field(line, "url") {
         Ok(Some(value)) => value,
@@ -904,6 +1184,322 @@ fn models_discover(id: &str, line: &str) -> String {
         json_string(&provider),
         json_string(&stdout)
     )
+}
+
+fn setup_run(id: &str) -> String {
+    let steps = r#"[
+        {"step":"provider","prompt":"Select provider","options":["openrouter","anthropic","openai","ollama"],"default":"openrouter"},
+        {"step":"api_key","prompt":"Enter API key","type":"password"},
+        {"step":"model","prompt":"Select default model","depends":"provider"},
+        {"step":"telegram_token","prompt":"Enter Telegram bot token (optional, from @BotFather)","optional":true},
+        {"step":"telegram_user_id","prompt":"Enter your Telegram user ID (optional, from @userinfobot)","optional":true}
+    ]"#;
+
+    format!(
+        "{{\"id\":{},\"ok\":true,\"event\":\"setup\",\"output\":{{\"steps\":{}}}}}",
+        json_string(id),
+        steps
+    )
+}
+
+fn setup_save(id: &str, line: &str) -> String {
+    let config_path = match json_field(line, "config_path") {
+        Ok(Some(path)) => path,
+        Ok(None) => return error_response(id, "missing config_path"),
+        Err(_) => return error_response(id, "invalid bridge request"),
+    };
+    let provider = match json_field(line, "provider") {
+        Ok(Some(p)) => p,
+        Ok(None) => "openrouter".to_string(),
+        Err(_) => return error_response(id, "invalid bridge request"),
+    };
+    let api_key = match json_field(line, "api_key") {
+        Ok(Some(k)) => k,
+        Ok(None) => String::new(),
+        Err(_) => return error_response(id, "invalid bridge request"),
+    };
+    let model = match json_field(line, "model") {
+        Ok(Some(m)) => m,
+        Ok(None) => String::new(),
+        Err(_) => return error_response(id, "invalid bridge request"),
+    };
+    let telegram_token = match json_field(line, "telegram_token") {
+        Ok(Some(t)) => t,
+        Ok(None) => String::new(),
+        Err(_) => return error_response(id, "invalid bridge request"),
+    };
+    let telegram_user_id = match json_field(line, "telegram_user_id") {
+        Ok(Some(u)) => u,
+        Ok(None) => String::new(),
+        Err(_) => return error_response(id, "invalid bridge request"),
+    };
+
+    // Build config JSON
+    let config_json = format!(
+        "{{\"data_dir\":\".zero-agent\",\"default_provider\":{},\"default_model\":{},\"api_key_env\":{},\"telegram\":{{\"bot_token\":{},\"allowed_users\":{}}}}}",
+        json_string(&provider),
+        json_string(&model),
+        json_string(&api_key),
+        json_string(&telegram_token),
+        json_string(&telegram_user_id)
+    );
+
+    // Write config file
+    if let Some(parent) = std::path::Path::new(&config_path).parent()
+        && !parent.as_os_str().is_empty()
+        && let Err(error) = std::fs::create_dir_all(parent)
+    {
+        return error_response(id, &format!("failed to create config directory: {error}"));
+    }
+
+    match std::fs::write(&config_path, &config_json) {
+        Ok(()) => format!(
+            "{{\"id\":{},\"ok\":true,\"event\":\"setup.saved\",\"output\":{{\"path\":{},\"config\":{}}}}}",
+            json_string(id),
+            json_string(&config_path),
+            config_json
+        ),
+        Err(error) => error_response(id, &format!("failed to save config: {error}")),
+    }
+}
+
+fn agent_run(id: &str, line: &str) -> String {
+    let config_path = match json_field(line, "config_path") {
+        Ok(Some(p)) => p,
+        Ok(None) => String::new(),
+        Err(_) => return error_response(id, "invalid bridge request"),
+    };
+
+    // Read config if provided
+    let config = if !config_path.is_empty() {
+        std::fs::read_to_string(&config_path).unwrap_or_default()
+    } else {
+        String::new()
+    };
+
+    let provider = match json_field(line, "provider") {
+        Ok(Some(p)) => p,
+        Ok(None) => {
+            if !config.is_empty() {
+                extract_json_nested_field(&config, &["default_provider"]).unwrap_or_else(|| "openrouter".to_string())
+            } else {
+                "openrouter".to_string()
+            }
+        }
+        Err(_) => return error_response(id, "invalid bridge request"),
+    };
+    let model = match json_field(line, "model") {
+        Ok(Some(m)) => m,
+        Ok(None) => {
+            if !config.is_empty() {
+                extract_json_nested_field(&config, &["default_model"]).unwrap_or_default()
+            } else {
+                return error_response(id, "missing model");
+            }
+        }
+        Err(_) => return error_response(id, "invalid bridge request"),
+    };
+    let api_key = match json_field(line, "api_key") {
+        Ok(Some(k)) => k,
+        Ok(None) => {
+            if !config.is_empty() {
+                extract_json_nested_field(&config, &["api_key_env"]).unwrap_or_default()
+            } else {
+                String::new()
+            }
+        }
+        Err(_) => return error_response(id, "invalid bridge request"),
+    };
+    let prompt = match json_field(line, "prompt") {
+        Ok(Some(p)) => p,
+        Ok(None) => return error_response(id, "missing prompt"),
+        Err(_) => return error_response(id, "invalid bridge request"),
+    };
+    let session_path = match json_field(line, "session_path") {
+        Ok(Some(p)) => p,
+        Ok(None) => String::new(),
+        Err(_) => return error_response(id, "invalid bridge request"),
+    };
+    let _tools_json = match json_field(line, "tools") {
+        Ok(Some(t)) => t,
+        Ok(None) => "[]".to_string(),
+        Err(_) => return error_response(id, "invalid bridge request"),
+    };
+
+    // Build messages array from session history + new prompt
+    let mut messages = String::from("[");
+    if !session_path.is_empty()
+        && let Ok(contents) = std::fs::read_to_string(&session_path) {
+        let mut first = true;
+        for line in contents.lines() {
+            let line = line.trim();
+            if line.is_empty() { continue; }
+            if !first { messages.push(','); }
+            messages.push_str(line);
+            first = false;
+        }
+    }
+    if !messages.is_empty() && messages != "[" {
+        messages.push(',');
+    }
+    messages.push_str(&format!("{{\"role\":\"user\",\"content\":{}}}", json_string(&prompt)));
+    messages.push(']');
+
+    // Build request body based on provider
+    let (url, body, headers) = match provider.as_str() {
+        "anthropic" => {
+            let url = "https://api.anthropic.com/v1/messages".to_string();
+            let body = format!(
+                "{{\"model\":{},\"max_tokens\":4096,\"messages\":{},\"stream\":true}}",
+                json_string(&model),
+                messages
+            );
+            let headers = format!("{{\"x-api-key\":{},\"anthropic-version\":\"2023-06-01\",\"Content-Type\":\"application/json\"}}", json_string(&api_key));
+            (url, body, headers)
+        }
+        _ => {
+            // OpenAI-compatible (openrouter, openai, ollama)
+            let url = match provider.as_str() {
+                "openai" => "https://api.openai.com/v1/chat/completions".to_string(),
+                "ollama" => "http://localhost:11434/v1/chat/completions".to_string(),
+                _ => "https://openrouter.ai/api/v1/chat/completions".to_string(),
+            };
+            let body = format!(
+                "{{\"model\":{},\"messages\":{},\"stream\":true}}",
+                json_string(&model),
+                messages
+            );
+            let headers = format!("{{\"Authorization\":\"Bearer {}\",\"Content-Type\":\"application/json\"}}", api_key);
+            (url, body, headers)
+        }
+    };
+
+    // Call SSE stream
+    let mut cmd = std::process::Command::new("curl");
+    cmd.arg("-s").arg("-S").arg("-N").arg("--no-buffer");
+    cmd.arg("-X").arg("POST");
+    cmd.arg("-H").arg("Accept: text/event-stream");
+
+    // Parse headers
+    let mut h = headers.as_str();
+    while let Some(key_start) = h.find('"') {
+        h = &h[key_start + 1..];
+        let Some(key_end) = h.find('"') else { break };
+        let key = &h[..key_end];
+        h = &h[key_end + 1..];
+        let Some(colon) = h.find(':') else { break };
+        h = &h[colon + 1..];
+        let Some(val_start) = h.find('"') else { break };
+        h = &h[val_start + 1..];
+        let Some(val_end) = h.find('"') else { break };
+        let val = &h[..val_end];
+        h = &h[val_end + 1..];
+        cmd.arg("-H").arg(format!("{key}: {val}"));
+    }
+
+    cmd.arg("-d").arg(&body);
+    cmd.arg(&url);
+
+    let output = match cmd.output() {
+        Ok(output) => output,
+        Err(error) => return error_response(id, &format!("failed to run curl: {error}")),
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+    if !output.status.success() {
+        return error_response(id, &format!("agent run failed: {stderr}"));
+    }
+
+    // Parse SSE events into normalized format
+    let mut events = Vec::new();
+    for line in stdout.lines() {
+        let line = line.trim();
+        if let Some(data) = line.strip_prefix("data: ") {
+            if data == "[DONE]" { continue; }
+            // Try to extract text content
+            let text = extract_sse_text(data);
+            if !text.is_empty() {
+                events.push(format!("{{\"kind\":\"text\",\"text\":{}}}", json_string(&text)));
+            }
+            // Try to extract tool calls (OpenAI format)
+            if let Some(tool_name) = extract_json_nested_field(data, &["choices", "0", "delta", "tool_calls", "0", "function", "name"]) {
+                let tool_args = extract_json_nested_field(data, &["choices", "0", "delta", "tool_calls", "0", "function", "arguments"]).unwrap_or_default();
+                events.push(format!("{{\"kind\":\"tool_call\",\"name\":{},\"input\":{}}}", json_string(&tool_name), json_string(&tool_args)));
+            }
+            // Try to extract tool calls (Anthropic format)
+            if let Some(tool_name) = extract_json_nested_field(data, &["content_block", "name"]) {
+                let tool_input = extract_json_nested_field(data, &["content_block", "input"]).unwrap_or_default();
+                events.push(format!("{{\"kind\":\"tool_call\",\"name\":{},\"input\":{}}}", json_string(&tool_name), json_string(&tool_input)));
+            }
+        }
+    }
+
+    let mut json_events = String::from("[");
+    for (i, evt) in events.iter().enumerate() {
+        if i > 0 { json_events.push(','); }
+        json_events.push_str(evt);
+    }
+    json_events.push(']');
+
+    // Persist assistant response to session
+    if !session_path.is_empty() && !events.is_empty() {
+        let _ = std::fs::OpenOptions::new().create(true).append(true).open(&session_path)
+            .and_then(|mut f| {
+                use std::io::Write;
+                writeln!(f, "{{\"role\":\"user\",\"content\":{}}}", json_string(&prompt))
+            });
+    }
+
+    format!(
+        "{{\"id\":{},\"ok\":true,\"event\":\"agent.run\",\"output\":{{\"events\":{},\"provider\":{},\"model\":{}}}}}",
+        json_string(id),
+        json_events,
+        json_string(&provider),
+        json_string(&model)
+    )
+}
+
+fn agent_tool(id: &str, line: &str) -> String {
+    let tool_name = match json_field(line, "name") {
+        Ok(Some(n)) => n,
+        Ok(None) => return error_response(id, "missing tool name"),
+        Err(_) => return error_response(id, "invalid bridge request"),
+    };
+    let tool_input = match json_field(line, "input") {
+        Ok(Some(i)) => i,
+        Ok(None) => "{}".to_string(),
+        Err(_) => return error_response(id, "invalid bridge request"),
+    };
+
+    // Dispatch to existing bridge operations
+    match tool_name.as_str() {
+        "read_file" => {
+            let path = extract_json_nested_field(&tool_input, &["path"]).unwrap_or_default();
+            fs_read(id, &format!("{{\"id\":{},\"op\":\"fs.read\",\"path\":{}}}", json_string(id), json_string(&path)))
+        }
+        "write_file" => {
+            let path = extract_json_nested_field(&tool_input, &["path"]).unwrap_or_default();
+            let contents = extract_json_nested_field(&tool_input, &["contents"]).unwrap_or_default();
+            fs_write(id, &format!("{{\"id\":{},\"op\":\"fs.write\",\"path\":{},\"contents\":{}}}", json_string(id), json_string(&path), json_string(&contents)))
+        }
+        "edit_file" => {
+            let path = extract_json_nested_field(&tool_input, &["path"]).unwrap_or_default();
+            let old_string = extract_json_nested_field(&tool_input, &["old_string"]).unwrap_or_default();
+            let new_string = extract_json_nested_field(&tool_input, &["new_string"]).unwrap_or_default();
+            fs_edit(id, &format!("{{\"id\":{},\"op\":\"fs.edit\",\"path\":{},\"old_string\":{},\"new_string\":{}}}", json_string(id), json_string(&path), json_string(&old_string), json_string(&new_string)))
+        }
+        "shell" => {
+            let command = extract_json_nested_field(&tool_input, &["command"]).unwrap_or_default();
+            shell_run(id, &format!("{{\"id\":{},\"op\":\"shell.run\",\"command\":{}}}", json_string(id), json_string(&command)))
+        }
+        "glob" => {
+            let pattern = extract_json_nested_field(&tool_input, &["pattern"]).unwrap_or_default();
+            fs_glob(id, &format!("{{\"id\":{},\"op\":\"fs.glob\",\"pattern\":{}}}", json_string(id), json_string(&pattern)))
+        }
+        _ => error_response(id, &format!("unknown tool: {}", tool_name))
+    }
 }
 
 /// Extract text content from SSE data (supports Anthropic and OpenAI formats)
