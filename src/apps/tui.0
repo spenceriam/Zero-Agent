@@ -1,9 +1,31 @@
 use core.events
 
+pub enum Pane {
+    Conversation,
+    Activity,
+    Input,
+}
+
 pub shape TuiLayout {
     conversation: String,
     activity: String,
     input: String,
+    active_pane: Pane,
+}
+
+pub shape RenderLine {
+    text: String,
+    kind: AgentEventKind,
+}
+
+pub shape ThinkingPanel {
+    visible: Bool,
+    content: String,
+}
+
+pub shape ProgressState {
+    active: Bool,
+    message: String,
 }
 
 pub fun defaultLayout() -> TuiLayout {
@@ -11,9 +33,48 @@ pub fun defaultLayout() -> TuiLayout {
         conversation: "conversation",
         activity: "activity",
         input: "input",
+        active_pane: Pane.Conversation,
     }
 }
 
-pub fun renderEvent(event: AgentEvent) -> String {
-    return event.text
+pub fun renderEvent(event: AgentEvent) -> RenderLine {
+    return RenderLine {
+        text: event.text,
+        kind: event.kind,
+    }
+}
+
+pub fun renderAssistantText(text: String) -> RenderLine {
+    return RenderLine {
+        text: text,
+        kind: AgentEventKind.AssistantText,
+    }
+}
+
+pub fun renderThinking(text: String) -> ThinkingPanel {
+    return ThinkingPanel {
+        visible: true,
+        content: text,
+    }
+}
+
+pub fun renderProgress(message: String) -> ProgressState {
+    return ProgressState {
+        active: true,
+        message: message,
+    }
+}
+
+pub fun renderStatus(text: String) -> RenderLine {
+    return RenderLine {
+        text: text,
+        kind: AgentEventKind.Status,
+    }
+}
+
+pub fun renderError(text: String) -> RenderLine {
+    return RenderLine {
+        text: text,
+        kind: AgentEventKind.Error,
+    }
 }
