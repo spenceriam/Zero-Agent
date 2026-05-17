@@ -1,3 +1,5 @@
+use core.events
+
 pub shape TuiLayout {
     conversation: String,
     activity: String,
@@ -10,4 +12,8 @@ pub fun defaultLayout() -> TuiLayout {
         activity: "activity",
         input: "input",
     }
+}
+
+pub fun renderEvent(event: AgentEvent) -> String {
+    return event.text
 }
