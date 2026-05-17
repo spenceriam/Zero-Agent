@@ -5,11 +5,7 @@ edition = "2024"
 
 [features]
 default = []
-tui = ["dep:ratatui", "dep:crossterm", "dep:syntect", "dep:pulldown-cmark"]
+tui = []
 
 [dependencies]
 glob = "0.3"
-ratatui = { version = "0.28", optional = true }
-crossterm = { version = "0.28", optional = true }
-syntect = { version = "5", default-features = false, features = ["default-fancy"], optional = true }
-pulldown-cmark = { version = "0.10", optional = true }

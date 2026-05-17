@@ -1,1 +1,0 @@
-// TODO: Collapsible thinking display

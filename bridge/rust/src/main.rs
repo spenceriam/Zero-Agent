@@ -1,19 +1,10 @@
 #[cfg(feature = "tui")]
-mod tui;
+pub mod tui;
 
 use std::char;
 use std::io::{self, BufRead, Write};
 
 fn main() -> io::Result<()> {
-    // Check for TUI mode
-    #[cfg(feature = "tui")]
-    {
-        let args: Vec<String> = std::env::args().collect();
-        if args.contains(&"tui".to_string()) {
-            return tui::run();
-        }
-    }
-
     let stdin = io::stdin();
     let mut stdout = io::stdout();
 
