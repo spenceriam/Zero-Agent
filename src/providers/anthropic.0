@@ -1,0 +1,72 @@
+use core.events
+use core.types
+
+pub shape AnthropicMessage {
+    role: String,
+    content: String,
+}
+
+pub shape AnthropicTool {
+    name: String,
+    description: String,
+    input_schema: String,
+}
+
+pub shape AnthropicRequest {
+    model: String,
+    max_tokens: Int,
+    messages: String,
+    tools: String,
+    stream: Bool,
+}
+
+pub shape AnthropicToolUse {
+    id: String,
+    name: String,
+    input: String,
+}
+
+pub shape AnthropicContent {
+    content_type: String,
+    text: String,
+    tool_use: AnthropicToolUse,
+}
+
+pub shape AnthropicResponse {
+    stop_reason: String,
+    content: String,
+}
+
+pub fun buildRequest(model: String, messages: String, tools: String) -> AnthropicRequest {
+    return AnthropicRequest {
+        model: model,
+        max_tokens: 4096,
+        messages: messages,
+        tools: tools,
+        stream: true,
+    }
+}
+
+pub fun toolSchema(name: String, description: String, schema: String) -> AnthropicTool {
+    return AnthropicTool {
+        name: name,
+        description: description,
+        input_schema: schema,
+    }
+}
+
+pub fun parseStreamEvent(event_type: String, data: String) -> AgentEvent {
+    return assistantText(data)
+}
+
+pub fun thinkingEvent(text: String) -> AgentEvent {
+    return providerThinking(text)
+}
+
+pub fun textEvent(text: String) -> AgentEvent {
+    return providerText(text)
+}
+
+pub fun toolUseEvent(name: String, input: String) -> AgentEvent {
+    return toolCall(name, input)
+}
