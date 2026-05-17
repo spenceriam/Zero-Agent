@@ -1,0 +1,71 @@
+use core.events
+use core.types
+
+pub shape OpenAIMessage {
+    role: String,
+    content: String,
+}
+
+pub shape OpenAITool {
+    tool_type: String,
+    function_name: String,
+    function_description: String,
+    function_parameters: String,
+}
+
+pub shape OpenAIToolCall {
+    id: String,
+    tool_type: String,
+    function_name: String,
+    function_arguments: String,
+}
+
+pub shape OpenAIRequest {
+    model: String,
+    messages: String,
+    tools: String,
+    stream: Bool,
+    max_tokens: Int,
+}
+
+pub shape OpenAIChoice {
+    finish_reason: String,
+    message: OpenAIMessage,
+}
+
+pub shape OpenAIResponse {
+    id: String,
+    model: String,
+    choices: String,
+}
+
+pub fun buildRequest(model: String, messages: String, tools: String) -> OpenAIRequest {
+    return OpenAIRequest {
+        model: model,
+        messages: messages,
+        tools: tools,
+        stream: true,
+        max_tokens: 4096,
+    }
+}
+
+pub fun toolSchema(name: String, description: String, parameters: String) -> OpenAITool {
+    return OpenAITool {
+        tool_type: "function",
+        function_name: name,
+        function_description: description,
+        function_parameters: parameters,
+    }
+}
+
+pub fun parseStreamEvent(data: String) -> AgentEvent {
+    return assistantText(data)
+}
+
+pub fun textDeltaEvent(text: String) -> AgentEvent {
+    return providerText(text)
+}
+
+pub fun toolCallEvent(name: String, arguments: String) -> AgentEvent {
+    return toolCall(name, arguments)
+}
