@@ -49,6 +49,9 @@ fn handle_line(line: &str) -> String {
         "config.validate" => validate_config(&id, line),
         "config.write" => write_config(&id, line),
         "config.read" => read_config(&id, line),
+        "session.append" => session_append(&id, line),
+        "session.read" => session_read(&id, line),
+        "session.list" => session_list(&id, line),
         "models.discover" => {
             let provider = match json_field(line, "provider") {
                 Ok(Some(provider)) => provider,
@@ -152,6 +155,114 @@ fn read_config(id: &str, line: &str) -> String {
         ),
         Err(error) => error_response(id, &format!("failed to read config: {error}")),
     }
+}
+
+fn session_append(id: &str, line: &str) -> String {
+    let path = match json_field(line, "path") {
+        Ok(Some(value)) => value,
+        Ok(None) => return error_response(id, "missing path"),
+        Err(_) => return error_response(id, "invalid bridge request"),
+    };
+    let contents = match json_field(line, "contents") {
+        Ok(Some(value)) => value,
+        Ok(None) => return error_response(id, "missing contents"),
+        Err(_) => return error_response(id, "invalid bridge request"),
+    };
+
+    if let Some(parent) = std::path::Path::new(&path).parent()
+        && !parent.as_os_str().is_empty()
+        && let Err(error) = std::fs::create_dir_all(parent)
+    {
+        return error_response(id, &format!("failed to create session directory: {error}"));
+    }
+
+    let mut file = match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        Ok(file) => file,
+        Err(error) => return error_response(id, &format!("failed to open session file: {error}")),
+    };
+
+    use std::io::Write;
+    match writeln!(file, "{contents}") {
+        Ok(()) => format!(
+            "{{\"id\":{},\"ok\":true,\"event\":\"session.appended\",\"output\":{{\"path\":{}}}}}",
+            json_string(id),
+            json_string(&path)
+        ),
+        Err(error) => error_response(id, &format!("failed to append to session: {error}")),
+    }
+}
+
+fn session_read(id: &str, line: &str) -> String {
+    let path = match json_field(line, "path") {
+        Ok(Some(value)) => value,
+        Ok(None) => return error_response(id, "missing path"),
+        Err(_) => return error_response(id, "invalid bridge request"),
+    };
+
+    match std::fs::read_to_string(&path) {
+        Ok(contents) => {
+            let lines: Vec<&str> = contents.lines().filter(|l| !l.trim().is_empty()).collect();
+            let mut json_lines = String::from("[");
+            for (i, l) in lines.iter().enumerate() {
+                if i > 0 {
+                    json_lines.push(',');
+                }
+                json_lines.push_str(json_string(l).as_str());
+            }
+            json_lines.push(']');
+            format!(
+                "{{\"id\":{},\"ok\":true,\"event\":\"session.read\",\"output\":{{\"path\":{},\"lines\":{}}}}}",
+                json_string(id),
+                json_string(&path),
+                json_lines
+            )
+        }
+        Err(error) => error_response(id, &format!("failed to read session: {error}")),
+    }
+}
+
+fn session_list(id: &str, line: &str) -> String {
+    let dir = match json_field(line, "dir") {
+        Ok(Some(value)) => value,
+        Ok(None) => return error_response(id, "missing dir"),
+        Err(_) => return error_response(id, "invalid bridge request"),
+    };
+
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(error) => return error_response(id, &format!("failed to list sessions: {error}")),
+    };
+
+    let mut sessions = Vec::new();
+    for entry in entries {
+        let Ok(entry) = entry else { continue };
+        let path = entry.path();
+        if path.extension().is_some_and(|ext| ext == "jsonl")
+            && let Some(name) = path.file_stem().and_then(|n| n.to_str())
+        {
+            sessions.push(name.to_string());
+        }
+    }
+
+    let mut json_list = String::from("[");
+    for (i, s) in sessions.iter().enumerate() {
+        if i > 0 {
+            json_list.push(',');
+        }
+        json_list.push_str(json_string(s).as_str());
+    }
+    json_list.push(']');
+
+    format!(
+        "{{\"id\":{},\"ok\":true,\"event\":\"session.list\",\"output\":{{\"dir\":{},\"sessions\":{}}}}}",
+        json_string(id),
+        json_string(&dir),
+        json_list
+    )
 }
 
 fn error_response(id: &str, message: &str) -> String {

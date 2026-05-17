@@ -1,3 +1,16 @@
+pub enum MessageRole {
+    User,
+    Assistant,
+    Tool,
+    System,
+}
+
+pub shape ChatMessage {
+    role: MessageRole,
+    content: String,
+    tool_name: String,
+}
+
 pub shape Session {
     id: String,
     title: String,
@@ -12,4 +25,24 @@ pub fun newSession(id: String, provider: String, model: String) -> Session {
         provider: provider,
         model: model,
     }
+}
+
+pub fun userMessage(content: String) -> ChatMessage {
+    return ChatMessage { role: MessageRole.User, content: content, tool_name: "" }
+}
+
+pub fun assistantMessage(content: String) -> ChatMessage {
+    return ChatMessage { role: MessageRole.Assistant, content: content, tool_name: "" }
+}
+
+pub fun toolMessage(content: String, tool_name: String) -> ChatMessage {
+    return ChatMessage { role: MessageRole.Tool, content: content, tool_name: tool_name }
+}
+
+pub fun systemMessage(content: String) -> ChatMessage {
+    return ChatMessage { role: MessageRole.System, content: content, tool_name: "" }
+}
+
+pub fun sessionPath(data_dir: String, session_id: String) -> String {
+    return data_dir + "/sessions/" + session_id + ".jsonl"
 }
