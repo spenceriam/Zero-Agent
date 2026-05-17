@@ -1,9 +1,20 @@
 use core.types
+use core.policy
 
 pub shape Tool {
     name: String,
     description: String,
     risk: RiskLevel,
+    input_schema: String,
+}
+
+pub shape ToolRegistry {
+    tools: String,
+}
+
+pub fun needsApproval(tool: Tool) -> Bool {
+    let decision = policy.decisionForRisk(tool.risk)
+    return decision == PermissionDecision.Ask
 }
 
 pub fun readFileTool() -> Tool {
@@ -11,6 +22,25 @@ pub fun readFileTool() -> Tool {
         name: "read_file",
         description: "Read a local file",
         risk: RiskLevel.Safe,
+        input_schema: "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}",
+    }
+}
+
+pub fun writeFileTool() -> Tool {
+    return Tool {
+        name: "write_file",
+        description: "Write content to a local file",
+        risk: RiskLevel.Mutating,
+        input_schema: "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"contents\":{\"type\":\"string\"}},\"required\":[\"path\",\"contents\"]}",
+    }
+}
+
+pub fun editFileTool() -> Tool {
+    return Tool {
+        name: "edit_file",
+        description: "Edit a local file with search and replace",
+        risk: RiskLevel.Mutating,
+        input_schema: "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"old_string\":{\"type\":\"string\"},\"new_string\":{\"type\":\"string\"}},\"required\":[\"path\",\"old_string\",\"new_string\"]}",
     }
 }
 
@@ -19,5 +49,24 @@ pub fun shellTool() -> Tool {
         name: "shell",
         description: "Run a shell command",
         risk: RiskLevel.Mutating,
+        input_schema: "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"}},\"required\":[\"command\"]}",
+    }
+}
+
+pub fun globTool() -> Tool {
+    return Tool {
+        name: "glob",
+        description: "Find files matching a pattern",
+        risk: RiskLevel.Safe,
+        input_schema: "{\"type\":\"object\",\"properties\":{\"pattern\":{\"type\":\"string\"}},\"required\":[\"pattern\"]}",
+    }
+}
+
+pub fun grepTool() -> Tool {
+    return Tool {
+        name: "grep",
+        description: "Search file contents with regex",
+        risk: RiskLevel.Safe,
+        input_schema: "{\"type\":\"object\",\"properties\":{\"pattern\":{\"type\":\"string\"}},\"required\":[\"pattern\"]}",
     }
 }
