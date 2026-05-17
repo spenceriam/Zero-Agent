@@ -57,6 +57,8 @@ fn handle_line(line: &str) -> String {
         "fs.edit" => fs_edit(&id, line),
         "fs.glob" => fs_glob(&id, line),
         "shell.run" => shell_run(&id, line),
+        "memory.save" => memory_save(&id, line),
+        "memory.list" => memory_list(&id, line),
         "models.discover" => {
             let provider = match json_field(line, "provider") {
                 Ok(Some(provider)) => provider,
@@ -437,6 +439,78 @@ fn shell_run(id: &str, line: &str) -> String {
         json_string(&stdout),
         json_string(&stderr)
     )
+}
+
+fn memory_save(id: &str, line: &str) -> String {
+    let path = match json_field(line, "path") {
+        Ok(Some(value)) => value,
+        Ok(None) => return error_response(id, "missing path"),
+        Err(_) => return error_response(id, "invalid bridge request"),
+    };
+    let contents = match json_field(line, "contents") {
+        Ok(Some(value)) => value,
+        Ok(None) => return error_response(id, "missing contents"),
+        Err(_) => return error_response(id, "invalid bridge request"),
+    };
+
+    if let Some(parent) = std::path::Path::new(&path).parent()
+        && !parent.as_os_str().is_empty()
+        && let Err(error) = std::fs::create_dir_all(parent)
+    {
+        return error_response(id, &format!("failed to create memory directory: {error}"));
+    }
+
+    let mut file = match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        Ok(file) => file,
+        Err(error) => return error_response(id, &format!("failed to open memory file: {error}")),
+    };
+
+    use std::io::Write;
+    match writeln!(file, "{contents}") {
+        Ok(()) => format!(
+            "{{\"id\":{},\"ok\":true,\"event\":\"memory.saved\",\"output\":{{\"path\":{}}}}}",
+            json_string(id),
+            json_string(&path)
+        ),
+        Err(error) => error_response(id, &format!("failed to save memory: {error}")),
+    }
+}
+
+fn memory_list(id: &str, line: &str) -> String {
+    let path = match json_field(line, "path") {
+        Ok(Some(value)) => value,
+        Ok(None) => return error_response(id, "missing path"),
+        Err(_) => return error_response(id, "invalid bridge request"),
+    };
+
+    match std::fs::read_to_string(&path) {
+        Ok(contents) => {
+            let lines: Vec<&str> = contents.lines().filter(|l| !l.trim().is_empty()).collect();
+            let mut json_lines = String::from("[");
+            for (i, l) in lines.iter().enumerate() {
+                if i > 0 {
+                    json_lines.push(',');
+                }
+                json_lines.push_str(json_string(l).as_str());
+            }
+            json_lines.push(']');
+            format!(
+                "{{\"id\":{},\"ok\":true,\"event\":\"memory.list\",\"output\":{{\"path\":{},\"items\":{}}}}}",
+                json_string(id),
+                json_string(&path),
+                json_lines
+            )
+        }
+        Err(_) => format!(
+            "{{\"id\":{},\"ok\":true,\"event\":\"memory.list\",\"output\":{{\"path\":{},\"items\":[]}}}}",
+            json_string(id),
+            json_string(&path)
+        ),
+    }
 }
 
 fn error_response(id: &str, message: &str) -> String {
