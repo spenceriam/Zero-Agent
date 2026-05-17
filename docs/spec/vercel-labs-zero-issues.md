@@ -58,12 +58,13 @@ Zero-Agent's stub provider and bridge test suite serve as agent-oriented benchma
 
 ### Directly relevant to Zero-Agent:
 
-- **#39: New provenance model** (ctate/borrow-provenance-foundation) - Borrow system changes may affect Zero-Agent's reference patterns
-- **#22: `zero new --json` envelope** - JSON output for project scaffolding
-- **#9: `zero fmt --write` and `--check --json`** - Formatting with JSON output
-- **#3: Target capability contract tests** - Tests for capability facts (relates to #7)
-- **#2: Diagnostic catalog as JSON** - JSON diagnostics for agent consumption
-- **#1: Fix-plan safety contract tests** - Repair safety metadata (relates to #6)
+- **#39: New provenance model** (ctate, 2453 additions, reviewed by vercel) - Borrow system overhaul; may require Zero-Agent reference pattern updates
+- **#42: NAM003 explain + catalog drift guard** (GodOnlyKn0w, supersedes #40) - Fixes `zero explain` for NAM003, adds coverage guard so diagnostic codes must have explain entries
+- **#22: `zero new --json` envelope** (mkitsugi) - Adds JSON output to `zero new` with kind, name, path, manifest, entry, nextSteps
+- **#9: `zero fmt --write` and `--check --json`** (mvanhorn) - Adds `--write` for in-place formatting, `--check --json` for structured diff output
+- **#3: Target capability contract tests** (EfeDurmaz16) - Asserts host capabilities include process/runtime surface; unavailable caps reported with `available: false`
+- **#2: Diagnostic catalog as JSON** (EfeDurmaz16) - `zero explain --json --all` for machine-readable diagnostic catalog with repair IDs and safety labels
+- **#1: Fix-plan safety contract tests** (EfeDurmaz16) - CLI coverage for fix-plan safety metadata, covers TYP009 repair contract
 
 ### Platform/infra:
 
@@ -84,7 +85,16 @@ These are upstream Zero language issues:
 
 ## Impact on Zero-Agent
 
-- PR #32 (type checker fixes) means Zero-Agent's `.0` files are now validated more strictly
-- PR #39 (provenance model) may require updates to borrow/reference patterns in Zero code
-- PRs #22, #9, #3, #2, #1 add JSON envelopes that Zero-Agent could consume for diagnostics
-- Issue #7 (capability summary) is partially addressed by PR #3's test coverage
+- **PR #32** (type checker fixes) - Zero-Agent's `.0` files are now validated more strictly; verified build still passes
+- **PR #39** (provenance model) - Borrow system overhaul may require updates to reference patterns in Zero code
+- **PR #42** (NAM003 explain) - Diagnostic catalog drift guard ensures `zero explain` stays in sync with `zero check`
+- **PRs #22, #9** (JSON envelopes) - `zero new --json` and `zero fmt --json` add structured output Zero-Agent could consume
+- **PRs #3, #2, #1** (contract tests) - Target capabilities, diagnostic catalog, and fix-plan safety become machine-readable
+- **Issue #7** (capability summary) - Partially addressed by PR #3's capability facts tests
+
+## Action Items
+
+- Monitor PR #39 (provenance model) for borrow pattern changes affecting Zero code
+- Consume `zero explain --json` and `zero fix --plan --json` when PRs #2, #42 merge
+- Use `zero fmt --check --json` for CI linting when PR #9 merges
+- Reference Zero-Agent's architecture on issues #4, #5 if upstream adopts language-level AI primitives
