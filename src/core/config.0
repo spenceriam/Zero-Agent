@@ -1,7 +1,35 @@
+pub shape ProviderConfig {
+    id: String,
+    display_name: String,
+    api_kind: String,
+    base_url: String,
+    api_key_env: String,
+}
+
+pub shape ModelConfig {
+    provider_id: String,
+    model_id: String,
+}
+
+pub shape ToolPolicyConfig {
+    allow_safe_without_prompt: Bool,
+    ask_before_mutating: Bool,
+    ask_before_destructive: Bool,
+}
+
 pub shape AppConfig {
     data_dir: String,
     default_provider: String,
     default_model: String,
+    tool_policy: ToolPolicyConfig,
+}
+
+pub fun defaultToolPolicy() -> ToolPolicyConfig {
+    return ToolPolicyConfig {
+        allow_safe_without_prompt: true,
+        ask_before_mutating: true,
+        ask_before_destructive: true,
+    }
 }
 
 pub fun defaultConfig() -> AppConfig {
@@ -9,5 +37,27 @@ pub fun defaultConfig() -> AppConfig {
         data_dir: ".zero-agent",
         default_provider: "openrouter",
         default_model: "",
+        tool_policy: defaultToolPolicy(),
     }
+}
+
+pub fun defaultOpenRouterProvider() -> ProviderConfig {
+    return ProviderConfig {
+        id: "openrouter",
+        display_name: "OpenRouter",
+        api_kind: "openai-compatible",
+        base_url: "https://openrouter.ai/api/v1",
+        api_key_env: "OPENROUTER_API_KEY",
+    }
+}
+
+pub fun defaultModel() -> ModelConfig {
+    return ModelConfig {
+        provider_id: "openrouter",
+        model_id: "",
+    }
+}
+
+pub fun isConfigValid(config: AppConfig) -> Bool {
+    return config.data_dir != "" && config.default_provider != ""
 }

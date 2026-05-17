@@ -41,6 +41,14 @@ fn handle_line(line: &str) -> String {
             "{{\"id\":{},\"ok\":true,\"event\":\"pong\",\"output\":{{\"ready\":true}}}}",
             json_string(&id)
         ),
+        "config.default" => format!(
+            "{{\"id\":{},\"ok\":true,\"event\":\"config\",\"output\":{}}}",
+            json_string(&id),
+            default_config_json()
+        ),
+        "config.validate" => validate_config(&id, line),
+        "config.write" => write_config(&id, line),
+        "config.read" => read_config(&id, line),
         "models.discover" => {
             let provider = match json_field(line, "provider") {
                 Ok(Some(provider)) => provider,
@@ -61,6 +69,88 @@ fn handle_line(line: &str) -> String {
             )
         }
         _ => error_response(&id, "unknown bridge op"),
+    }
+}
+
+fn default_config_json() -> &'static str {
+    "{\"data_dir\":\".zero-agent\",\"default_provider\":\"openrouter\",\"default_model\":\"\",\"tool_policy\":{\"allow_safe_without_prompt\":true,\"ask_before_mutating\":true,\"ask_before_destructive\":true}}"
+}
+
+fn validate_config(id: &str, line: &str) -> String {
+    let data_dir = match json_field(line, "data_dir") {
+        Ok(Some(value)) => value,
+        Ok(None) => return config_validation_response(id, false, "missing data_dir"),
+        Err(_) => return error_response(id, "invalid bridge request"),
+    };
+    let default_provider = match json_field(line, "default_provider") {
+        Ok(Some(value)) => value,
+        Ok(None) => return config_validation_response(id, false, "missing default_provider"),
+        Err(_) => return error_response(id, "invalid bridge request"),
+    };
+
+    if data_dir.is_empty() {
+        return config_validation_response(id, false, "data_dir must not be empty");
+    }
+    if default_provider.is_empty() {
+        return config_validation_response(id, false, "default_provider must not be empty");
+    }
+
+    config_validation_response(id, true, "")
+}
+
+fn config_validation_response(id: &str, valid: bool, error: &str) -> String {
+    format!(
+        "{{\"id\":{},\"ok\":true,\"event\":\"config.validation\",\"output\":{{\"valid\":{},\"error\":{}}}}}",
+        json_string(id),
+        valid,
+        json_string(error)
+    )
+}
+
+fn write_config(id: &str, line: &str) -> String {
+    let path = match json_field(line, "path") {
+        Ok(Some(value)) => value,
+        Ok(None) => return error_response(id, "missing path"),
+        Err(_) => return error_response(id, "invalid bridge request"),
+    };
+    let contents = match json_field(line, "contents") {
+        Ok(Some(value)) => value,
+        Ok(None) => return error_response(id, "missing contents"),
+        Err(_) => return error_response(id, "invalid bridge request"),
+    };
+
+    if let Some(parent) = std::path::Path::new(&path).parent()
+        && !parent.as_os_str().is_empty()
+        && let Err(error) = std::fs::create_dir_all(parent)
+    {
+        return error_response(id, &format!("failed to create config directory: {error}"));
+    }
+
+    match std::fs::write(&path, contents) {
+        Ok(()) => format!(
+            "{{\"id\":{},\"ok\":true,\"event\":\"config.written\",\"output\":{{\"path\":{}}}}}",
+            json_string(id),
+            json_string(&path)
+        ),
+        Err(error) => error_response(id, &format!("failed to write config: {error}")),
+    }
+}
+
+fn read_config(id: &str, line: &str) -> String {
+    let path = match json_field(line, "path") {
+        Ok(Some(value)) => value,
+        Ok(None) => return error_response(id, "missing path"),
+        Err(_) => return error_response(id, "invalid bridge request"),
+    };
+
+    match std::fs::read_to_string(&path) {
+        Ok(contents) => format!(
+            "{{\"id\":{},\"ok\":true,\"event\":\"config.read\",\"output\":{{\"path\":{},\"contents\":{}}}}}",
+            json_string(id),
+            json_string(&path),
+            json_string(&contents)
+        ),
+        Err(error) => error_response(id, &format!("failed to read config: {error}")),
     }
 }
 
@@ -192,10 +282,25 @@ mod tests {
         assert!(response.contains("invalid bridge request"));
     }
 
+
     #[test]
     fn returns_model_discovery_stub() {
         let response = handle_line(r#"{"id":"2","op":"models.discover","provider":"openrouter"}"#);
         assert!(response.contains(r#""event":"models""#));
         assert!(response.contains(r#""provider":"openrouter""#));
+    }
+
+    #[test]
+    fn validates_default_config_fields() {
+        let response = handle_line(r#"{"id":"3","op":"config.validate","data_dir":".zero-agent","default_provider":"openrouter"}"#);
+        assert!(response.contains(r#""event":"config.validation""#));
+        assert!(response.contains(r#""valid":true"#));
+    }
+
+    #[test]
+    fn rejects_invalid_config_fields() {
+        let response = handle_line(r#"{"id":"4","op":"config.validate","data_dir":"","default_provider":"openrouter"}"#);
+        assert!(response.contains(r#""event":"config.validation""#));
+        assert!(response.contains(r#""valid":false"#));
     }
 }
