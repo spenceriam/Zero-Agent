@@ -331,7 +331,7 @@ pub fn print_user_message(text: &str) {
 
 /// Print an agent message with markdown rendering
 pub fn print_agent_message(text: &str) {
-    print!("  {CYAN}{BOLD}MAX     {RESET}");
+    print!("  {CYAN}{BOLD}ZERO     {RESET}");
     render_markdown(text, 10);
     println!();
 }
@@ -716,7 +716,7 @@ pub fn process_stream_chunk(app: &mut App, chunk: &str) {
         if ch == '\n' {
             // Line complete - print with formatting
             if app.stream_is_first_line {
-                print!("  {CYAN}{BOLD}MAX     {RESET}");
+                print!("  {CYAN}{BOLD}ZERO     {RESET}");
                 app.stream_is_first_line = false;
             } else {
                 print!("  {DIM}        {RESET}");
@@ -736,7 +736,7 @@ pub fn process_stream_chunk(app: &mut App, chunk: &str) {
 pub fn finish_streaming(app: &mut App) {
     if !app.stream_line_buffer.is_empty() {
         if app.stream_is_first_line {
-            print!("  {CYAN}{BOLD}MAX     {RESET}");
+            print!("  {CYAN}{BOLD}ZERO     {RESET}");
         } else {
             print!("  {DIM}        {RESET}");
         }
