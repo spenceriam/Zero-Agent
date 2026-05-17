@@ -1,9 +1,16 @@
 use core.events
+use core.types
 
 pub enum Pane {
     Conversation,
     Activity,
     Input,
+}
+
+pub enum ApprovalChoice {
+    Approve,
+    Deny,
+    AlwaysApprove,
 }
 
 pub shape TuiLayout {
@@ -28,12 +35,31 @@ pub shape ProgressState {
     message: String,
 }
 
+pub shape ApprovalPrompt {
+    visible: Bool,
+    tool_name: String,
+    description: String,
+    risk: RiskLevel,
+}
+
+pub shape InputState {
+    text: String,
+    cursor: Int,
+}
+
 pub fun defaultLayout() -> TuiLayout {
     return TuiLayout {
         conversation: "conversation",
         activity: "activity",
         input: "input",
         active_pane: Pane.Conversation,
+    }
+}
+
+pub fun defaultInput() -> InputState {
+    return InputState {
+        text: "",
+        cursor: 0,
     }
 }
 
@@ -76,5 +102,23 @@ pub fun renderError(text: String) -> RenderLine {
     return RenderLine {
         text: text,
         kind: AgentEventKind.Error,
+    }
+}
+
+pub fun renderApproval(tool_name: String, description: String, risk: RiskLevel) -> ApprovalPrompt {
+    return ApprovalPrompt {
+        visible: true,
+        tool_name: tool_name,
+        description: description,
+        risk: risk,
+    }
+}
+
+pub fun hideApproval() -> ApprovalPrompt {
+    return ApprovalPrompt {
+        visible: false,
+        tool_name: "",
+        description: "",
+        risk: RiskLevel.Safe,
     }
 }
