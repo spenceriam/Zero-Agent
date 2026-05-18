@@ -1,35 +1,163 @@
-#!/usr/bin/env sh
-set -eu
+#!/bin/bash
+set -e
 
-INSTALL_DIR="${HOME}/.zero-agent/bin"
-BRIDGE_DIR="$(cd "$(dirname "$0")/../bridge/rust" && pwd)"
-ZERO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+# Zero-Agent Installer
+# Usage: curl -fsSL https://raw.githubusercontent.com/spenceriam/Zero-Agent/main/scripts/install.sh | bash
 
-echo "Zero-Agent installer"
-echo ""
-echo "This script builds and installs Zero-Agent from source."
+REPO="spenceriam/Zero-Agent"
+INSTALL_DIR="${ZERO_HOME:-$HOME/.zero-agent}"
+BIN_DIR="$INSTALL_DIR/bin"
+
+echo "  Installing Zero-Agent..."
 echo ""
 
 # Check for required tools
-command -v cargo >/dev/null 2>&1 || { echo "Error: cargo not found. Install Rust first."; exit 1; }
-command -v zero >/dev/null 2>&1 || { echo "Warning: zero CLI not found. Zero source won't be compiled."; }
+check_command() {
+    if ! command -v "$1" &> /dev/null; then
+        echo "Error: $1 is required but not installed."
+        echo "Please install $1 and try again."
+        exit 1
+    fi
+}
 
-echo "Building Rust bridge..."
-cd "$BRIDGE_DIR"
-cargo build --release 2>&1 || { echo "Error: Bridge build failed."; exit 1; }
+check_command curl
+check_command git
 
-echo "Installing to ${INSTALL_DIR}..."
+# Check for Rust
+if ! command -v cargo &> /dev/null; then
+    echo "Rust not found. Installing via rustup..."
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+    source "$HOME/.cargo/env"
+fi
+
+echo "  Cloning repository..."
 mkdir -p "$INSTALL_DIR"
-cp "$BRIDGE_DIR/target/release/zero-agent-bridge" "$INSTALL_DIR/zero-agent-bridge" 2>/dev/null || \
-cp "$BRIDGE_DIR/target/release/zero-agent-bridge.exe" "$INSTALL_DIR/zero-agent-bridge.exe" 2>/dev/null || \
-{ echo "Error: Bridge binary not found."; exit 1; }
+if [ -d "$INSTALL_DIR/zero-agent" ]; then
+    cd "$INSTALL_DIR/zero-agent"
+    git pull --quiet
+else
+    git clone --quiet "https://github.com/$REPO.git" "$INSTALL_DIR/zero-agent"
+    cd "$INSTALL_DIR/zero-agent"
+fi
+
+echo "  Building..."
+cd bridge/rust
+cargo build --release --quiet 2>&1
+
+echo "  Installing binary..."
+mkdir -p "$BIN_DIR"
+cp target/release/zero-agent-bridge "$BIN_DIR/zero"
+
+# Add to PATH if not already there
+SHELL_RC="$HOME/.bashrc"
+if [ -n "$ZSH_VERSION" ]; then
+    SHELL_RC="$HOME/.zshrc"
+fi
+
+if ! echo "$PATH" | grep -q "$BIN_DIR"; then
+    echo "" >> "$SHELL_RC"
+    echo "# Zero-Agent" >> "$SHELL_RC"
+    echo "export PATH=\"\$PATH:$BIN_DIR\"" >> "$SHELL_RC"
+    echo ""
+    echo "  Added $BIN_DIR to PATH in $SHELL_RC"
+    echo "  Run 'source $SHELL_RC' or restart your terminal."
+fi
+
+# Create default config
+CONFIG_DIR="$INSTALL_DIR/config"
+mkdir -p "$CONFIG_DIR"
+if [ ! -f "$CONFIG_DIR/config.json" ]; then
+    cat > "$CONFIG_DIR/config.json" << 'EJSON'
+{
+  "data_dir": "~/.zero-agent/config",
+  "default_provider": "openrouter",
+  "providers": [
+    {
+      "id": "openrouter",
+      "name": "OpenRouter",
+      "api_format": "openai",
+      "base_url": "https://openrouter.ai/api/v1",
+      "api_key": "",
+      "default_model": "anthropic/claude-sonnet-4",
+      "models": []
+    },
+    {
+      "id": "openai",
+      "name": "OpenAI",
+      "api_format": "openai",
+      "base_url": "https://api.openai.com/v1",
+      "api_key": "",
+      "default_model": "gpt-4o",
+      "models": []
+    },
+    {
+      "id": "anthropic",
+      "name": "Anthropic",
+      "api_format": "anthropic",
+      "base_url": "https://api.anthropic.com",
+      "api_key": "",
+      "default_model": "claude-sonnet-4-20250514",
+      "models": []
+    },
+    {
+      "id": "ollama",
+      "name": "Ollama (Local)",
+      "api_format": "openai",
+      "base_url": "http://localhost:11434/v1",
+      "api_key": "",
+      "default_model": "llama3",
+      "models": []
+    }
+  ],
+  "tool_policy": {
+    "allow_safe_without_prompt": true,
+    "ask_before_mutating": true,
+    "ask_before_destructive": true
+  },
+  "telegram": {
+    "bot_token": "",
+    "allowed_users": ""
+  }
+}
+EJSON
+    echo "  Created default config at $CONFIG_DIR/config.json"
+fi
+
+# Create .env template
+if [ ! -f "$CONFIG_DIR/.env" ]; then
+    cat > "$CONFIG_DIR/.env" << 'EENV'
+# Zero-Agent API Keys
+# Uncomment and add your keys:
+
+# OPENROUTER_API_KEY=your_key_here
+# OPENAI_API_KEY=your_key_here
+# ANTHROPIC_API_KEY=your_key_here
+# TELEGRAM_BOT_TOKEN=your_bot_token_here
+# TELEGRAM_ALLOWED_USERS=your_user_id_here
+EENV
+    echo "  Created .env template at $CONFIG_DIR/.env"
+fi
+
+# Create SOUL.md template
+if [ ! -f "$CONFIG_DIR/SOUL.md" ]; then
+    cat > "$CONFIG_DIR/SOUL.md" << 'EMD'
+# ZERO
+
+You are ZERO, a personal AI assistant for developers.
+You are running locally on the user's machine.
+You have access to tools for reading/writing files, running shell commands, and searching files.
+Be concise and direct. When you need to do something, use your tools.
+EMD
+    echo "  Created SOUL.md at $CONFIG_DIR/SOUL.md"
+fi
 
 echo ""
-echo "Zero-Agent bridge installed to ${INSTALL_DIR}"
+echo "  Zero-Agent installed successfully!"
 echo ""
-echo "Add to your PATH:"
-echo "  export PATH=\"${INSTALL_DIR}:\$PATH\""
+echo "  Quick start:"
+echo "    1. Add your API key to $CONFIG_DIR/.env"
+echo "    2. Run: $BIN_DIR/zero"
 echo ""
-echo "Build from source:"
-echo "  cd ${ZERO_DIR}"
-echo "  zero build src/main.0"
+echo "  Or use the interactive REPL:"
+echo "    $ $BIN_DIR/zero"
+echo ""

@@ -112,18 +112,85 @@ impl Config {
         PathBuf::from(&self.data_dir).join("config.json")
     }
 
+    pub fn env_path(&self) -> PathBuf {
+        PathBuf::from(&self.data_dir).join(".env")
+    }
+
+    pub fn soul_path(&self) -> PathBuf {
+        PathBuf::from(&self.data_dir).join("SOUL.md")
+    }
+
+    pub fn sessions_dir(&self) -> PathBuf {
+        PathBuf::from(&self.data_dir).join("sessions")
+    }
+
     pub fn load() -> Self {
         let default = Self::default();
         let path = default.config_path();
-        if path.exists() {
+        let mut config = if path.exists() {
             match std::fs::read_to_string(&path) {
                 Ok(contents) => serde_json::from_str(&contents).unwrap_or(default),
                 Err(_) => default,
             }
         } else {
-            // Auto-create default config on first run
             let _ = default.save();
             default
+        };
+
+        // Load .env file for API keys
+        config.load_env();
+
+        // Ensure directories exist
+        let _ = std::fs::create_dir_all(config.sessions_dir());
+
+        config
+    }
+
+    fn load_env(&mut self) {
+        let env_path = self.env_path();
+        if !env_path.exists() {
+            return;
+        }
+
+        let Ok(contents) = std::fs::read_to_string(&env_path) else {
+            return;
+        };
+
+        for line in contents.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+
+            if let Some((key, value)) = line.split_once('=') {
+                let key = key.trim();
+                let value = value.trim().trim_matches('"');
+
+                // Apply env values to config
+                match key {
+                    "OPENROUTER_API_KEY" => self.set_provider_key("openrouter", value),
+                    "OPENAI_API_KEY" => self.set_provider_key("openai", value),
+                    "ANTHROPIC_API_KEY" => self.set_provider_key("anthropic", value),
+                    "TELEGRAM_BOT_TOKEN" => self.telegram.bot_token = value.to_string(),
+                    "TELEGRAM_ALLOWED_USERS" => self.telegram.allowed_users = value.to_string(),
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    fn set_provider_key(&mut self, provider_id: &str, key: &str) {
+        if let Some(provider) = self.providers.iter_mut().find(|p| p.id == provider_id) {
+            provider.api_key = key.to_string();
+        }
+    }
+
+    pub fn load_soul(&self) -> Option<String> {
+        let soul_path = self.soul_path();
+        if soul_path.exists() {
+            std::fs::read_to_string(&soul_path).ok()
+        } else {
+            None
         }
     }
 

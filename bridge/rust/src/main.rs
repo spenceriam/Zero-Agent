@@ -3,6 +3,7 @@ pub mod tui;
 
 mod agent;
 mod config;
+mod gateway;
 mod provider;
 mod tools;
 
@@ -838,160 +839,24 @@ fn telegram_loop(id: &str, line: &str) -> String {
         Err(_) => return error_response(id, "invalid bridge request"),
     };
 
-    let mut offset: i64 = 0;
-    let mut updates_processed = 0;
+    let config = gateway::GatewayConfig {
+        token,
+        allowed_users,
+        api_key,
+        model,
+        provider,
+        session_dir,
+    };
 
-    loop {
-        // Poll for updates
-        let poll_url = format!(
-            "https://api.telegram.org/bot{}/getUpdates?offset={}&timeout=30",
-            token, offset
-        );
-
-        let output = match std::process::Command::new("curl")
-            .arg("-s").arg("-S")
-            .arg("--max-time").arg("35")
-            .arg(&poll_url)
-            .output()
-        {
-            Ok(output) => output,
-            Err(error) => {
-                eprintln!("telegram poll error: {error}");
-                std::thread::sleep(std::time::Duration::from_secs(5));
-                continue;
-            }
-        };
-
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        if !output.status.success() {
-            eprintln!("telegram poll failed: {}", String::from_utf8_lossy(&output.stderr));
-            std::thread::sleep(std::time::Duration::from_secs(5));
-            continue;
-        }
-
-        // Parse updates - look for "update_id" and "message" fields
-        let mut pos = 0;
-        while let Some(update_start) = stdout[pos..].find("\"update_id\":") {
-            let abs_pos = pos + update_start;
-            // Extract update_id
-            let after_key = &stdout[abs_pos + 12..];
-            let update_id_end = after_key.find(|c: char| !c.is_ascii_digit()).unwrap_or(after_key.len());
-            let update_id: i64 = after_key[..update_id_end].trim().parse().unwrap_or(0);
-
-            if update_id >= offset {
-                offset = update_id + 1;
-            }
-
-            // Extract message text
-            let msg_start = stdout[abs_pos..].find("\"text\":");
-            let chat_id_start = stdout[abs_pos..].find("\"chat\":{").and_then(|ci| {
-                stdout[abs_pos + ci..].find("\"id\":")
-            });
-            let user_id_start = stdout[abs_pos..].find("\"from\":{").and_then(|ui| {
-                stdout[abs_pos + ui..].find("\"id\":")
-            });
-
-            if let (Some(msg_off), Some(chat_off)) = (msg_start, chat_id_start) {
-                let text_abs = abs_pos + msg_off;
-                let chat_abs = abs_pos + chat_off;
-
-                // Extract text value
-                let text_after = &stdout[text_abs + 7..];
-                let text_val = if let Some(stripped) = text_after.strip_prefix('"') {
-                    let val_end = stripped.find('"').unwrap_or(stripped.len());
-                    stripped[..val_end].to_string()
-                } else {
-                    String::new()
-                };
-
-                // Extract chat_id
-                let chat_after = &stdout[chat_abs..];
-                let chat_id_val = if let Some(cid_start) = chat_after.find("\"id\":") {
-                    let cid_after = &chat_after[cid_start + 5..];
-                    let cid_end = cid_after.find(|c: char| !c.is_ascii_digit() && c != '-').unwrap_or(cid_after.len());
-                    cid_after[..cid_end].trim().to_string()
-                } else {
-                    String::new()
-                };
-
-                // Extract user_id for auth check
-                let user_id_val = if let Some(uid_off) = user_id_start {
-                    let uid_abs = abs_pos + uid_off;
-                    let uid_after = &stdout[uid_abs..];
-                    if let Some(uid_start) = uid_after.find("\"id\":") {
-                        let uid_val_after = &uid_after[uid_start + 5..];
-                        let uid_end = uid_val_after.find(|c: char| !c.is_ascii_digit()).unwrap_or(uid_val_after.len());
-                        uid_val_after[..uid_end].trim().to_string()
-                    } else {
-                        String::new()
-                    }
-                } else {
-                    String::new()
-                };
-
-                // Auth check
-                if !allowed_users.is_empty() && !user_id_val.is_empty()
-                    && !allowed_users.contains(&user_id_val) {
-                    eprintln!("telegram: unauthorized user {user_id_val}");
-                    pos = abs_pos + 1;
-                    continue;
-                }
-
-                // Handle commands
-                if text_val.starts_with('/') {
-                    let cmd_response = match text_val.split_whitespace().next().unwrap_or("") {
-                        "/start" => "Welcome to Zero-Agent! Send me a message to get started.",
-                        "/help" => "Available commands:\n/start - Start session\n/help - Show help\n/status - Show status",
-                        "/status" => "Zero-Agent is running.",
-                        _ => "Unknown command. Type /help for available commands.",
-                    };
-                    let _ = send_telegram_message(&token, &chat_id_val, cmd_response);
-                } else if !text_val.is_empty() && !chat_id_val.is_empty() {
-                    // Send typing indicator
-                    let _ = send_telegram_action(&token, &chat_id_val, "typing");
-
-                    // Call agent.run
-                    let session_path = format!("{}/{}.jsonl", session_dir, chat_id_val);
-                    let agent_line = format!(
-                        "{{\"id\":\"{}\",\"op\":\"agent.run\",\"provider\":{},\"model\":{},\"api_key\":{},\"prompt\":{},\"session_path\":{}}}",
-                        id,
-                        json_string(&provider),
-                        json_string(&model),
-                        json_string(&api_key),
-                        json_string(&text_val),
-                        json_string(&session_path)
-                    );
-                    let agent_response = agent_run(id, &agent_line);
-
-                    // Extract text from agent response
-                    let response_text = extract_agent_response_text(&agent_response);
-
-                    if !response_text.is_empty() {
-                        // Chunk and send response
-                        let chunks = chunk_message(&response_text, 4096);
-                        for chunk in chunks {
-                            let _ = send_telegram_message(&token, &chat_id_val, &chunk);
-                        }
-                    }
-                }
-
-                updates_processed += 1;
-            }
-
-            pos = abs_pos + 1;
-        }
-
-        // Safety: exit after processing some updates in test mode
-        if updates_processed > 0 && std::env::var("TELEGRAM_TEST_MODE").is_ok() {
-            break;
-        }
+    // Run gateway in a blocking tokio runtime
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    match rt.block_on(gateway::run_gateway(config)) {
+        Ok(()) => format!(
+            "{{\"id\":{},\"ok\":true,\"event\":\"telegram.loop\",\"output\":{{\"status\":\"stopped\"}}}}",
+            json_string(id)
+        ),
+        Err(e) => error_response(id, &format!("gateway error: {e}")),
     }
-
-    format!(
-        "{{\"id\":{},\"ok\":true,\"event\":\"telegram.loop\",\"output\":{{\"updates_processed\":{}}}}}",
-        json_string(id),
-        updates_processed
-    )
 }
 
 fn send_telegram_message(token: &str, chat_id: &str, text: &str) -> Result<(), String> {

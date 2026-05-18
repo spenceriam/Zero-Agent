@@ -1,0 +1,24 @@
+services:
+  zero:
+    build: .
+    image: zero-agent
+    container_name: zero-agent
+    restart: unless-stopped
+    volumes:
+      - ~/.zero-agent:/home/zero/.zero-agent
+    environment:
+      - ZERO_UID=${ZERO_UID:-10000}
+    stdin_open: true
+    tty: true
+    command: []
+
+  gateway:
+    build: .
+    image: zero-agent
+    container_name: zero-gateway
+    restart: unless-stopped
+    volumes:
+      - ~/.zero-agent:/home/zero/.zero-agent
+    environment:
+      - ZERO_UID=${ZERO_UID:-10000}
+    command: ["--gateway"]

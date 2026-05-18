@@ -1,6 +1,6 @@
 use crate::config::Config;
 use crate::provider::{Message, Provider, StreamEventType};
-use crate::tools;
+use crate::tools::{self, ToolRegistry};
 
 #[cfg(feature = "tui")]
 use crate::tui;
@@ -87,7 +87,8 @@ impl Agent {
         });
         self.message_count += 1;
 
-        let tools = tools::builtin_tools();
+        let tool_registry = ToolRegistry::default();
+        let tools = tool_registry.definitions();
 
         loop {
             // Start spinner
@@ -173,7 +174,7 @@ impl Agent {
                     let tool_start = std::time::Instant::now();
                     let args: serde_json::Value =
                         serde_json::from_str(args_str).unwrap_or(serde_json::json!({}));
-                    let result = tools::execute_tool(name, &args);
+                    let result = tool_registry.execute(name, &args);
                     let tool_elapsed = tool_start.elapsed();
 
                     // Show tool call line (completed)
