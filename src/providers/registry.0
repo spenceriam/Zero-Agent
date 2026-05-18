@@ -13,72 +13,30 @@ pub shape Provider {
     capability: ProviderCapability,
 }
 
-pub shape ProviderRequest {
-    model: String,
-    messages: String,
-    tools: String,
-}
-
-pub shape ProviderRegistry {
-    providers: String,
-}
-
 pub fun openRouterProvider() -> Provider {
-    return Provider {
-        id: "openrouter",
-        display_name: "OpenRouter",
-        capability: ProviderCapability {
-            streaming: true,
-            tool_calling: true,
-            thinking_events: false,
-            model_discovery: true,
-        },
-    }
+    let cap = ProviderCapability { streaming: true, tool_calling: true, thinking_events: false, model_discovery: true }
+    return Provider { id: "openrouter", display_name: "OpenRouter", capability: cap }
 }
 
 pub fun anthropicProvider() -> Provider {
-    return Provider {
-        id: "anthropic",
-        display_name: "Anthropic",
-        capability: ProviderCapability {
-            streaming: true,
-            tool_calling: true,
-            thinking_events: true,
-            model_discovery: false,
-        },
-    }
+    let cap = ProviderCapability { streaming: true, tool_calling: true, thinking_events: true, model_discovery: false }
+    return Provider { id: "anthropic", display_name: "Anthropic", capability: cap }
 }
 
 pub fun openaiProvider() -> Provider {
-    return Provider {
-        id: "openai",
-        display_name: "OpenAI",
-        capability: ProviderCapability {
-            streaming: true,
-            tool_calling: true,
-            thinking_events: false,
-            model_discovery: true,
-        },
-    }
+    let cap = ProviderCapability { streaming: true, tool_calling: true, thinking_events: false, model_discovery: true }
+    return Provider { id: "openai", display_name: "OpenAI", capability: cap }
 }
 
 pub fun stubProvider() -> Provider {
-    return Provider {
-        id: "stub",
-        display_name: "Stub (testing)",
-        capability: ProviderCapability {
-            streaming: false,
-            tool_calling: true,
-            thinking_events: false,
-            model_discovery: false,
-        },
-    }
+    let cap = ProviderCapability { streaming: false, tool_calling: true, thinking_events: false, model_discovery: false }
+    return Provider { id: "stub", display_name: "Stub (testing)", capability: cap }
 }
 
 pub fun stubStreamResponse() -> AgentEvent {
-    return assistantText("This is a stub response from the provider registry.")
+    return makeAssistantText("This is a stub response from the provider registry.")
 }
 
 pub fun stubToolCall() -> AgentEvent {
-    return toolCall("read_file", "{\"path\":\"example.txt\"}")
+    return makeToolCall("read_file", "example.txt")
 }

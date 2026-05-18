@@ -1,10 +1,125 @@
 #[cfg(feature = "tui")]
 pub mod tui;
 
+mod agent;
+mod config;
+mod provider;
+mod tools;
+
 use std::char;
 use std::io::{self, BufRead, Write};
 
-fn main() -> io::Result<()> {
+#[tokio::main]
+async fn main() {
+    let args: Vec<String> = std::env::args().collect();
+
+    if args.get(1).map(|s| s.as_str()) == Some("--bridge") {
+        bridge_mode().expect("bridge mode failed");
+    } else {
+        interactive_mode().await;
+    }
+}
+
+async fn interactive_mode() {
+    let cfg = config::Config::load();
+
+    // Check if provider has an API key configured
+    let provider = cfg.default_provider();
+    if provider.api_key.is_empty()
+        && !provider.base_url.contains("localhost")
+    {
+        eprintln!("\x1b[1;33m!\x1b[0m No API key configured for provider '{}'", provider.name);
+        eprintln!("  Edit: {}/config.json", cfg.data_dir);
+        eprintln!("  Set \"api_key\" for your provider.\n");
+    }
+
+    let mut agent = agent::Agent::new(&cfg, None);
+
+    #[cfg(feature = "tui")]
+    {
+        let mut app = tui::App::new();
+        app.model = agent.model().to_string();
+        app.provider = agent.provider_id().to_string();
+        app.session_name = "main".to_string();
+        tui::print_status_bar(&app);
+    }
+
+    #[cfg(not(feature = "tui"))]
+    {
+        println!("\x1b[1;36m\u{250c}\u{2500}\x1b[0m ZERO Agent");
+        println!("\x1b[1;36m\u{2502}\x1b[0m Provider: \x1b[33m{}\x1b[0m / \x1b[33m{}\x1b[0m", provider.name, provider.default_model);
+        println!("\x1b[1;36m\u{2502}\x1b[0m Type your message, or \x1b[1m/quit\x1b[0m to exit.");
+        println!("\x1b[1;36m\u{2514}\x1b[0m");
+    }
+
+    let stdin = io::stdin();
+
+    loop {
+        #[cfg(feature = "tui")]
+        {
+            let app = tui::App::new();
+            tui::print_prompt(&app);
+        }
+
+        #[cfg(not(feature = "tui"))]
+        {
+            print!("\n\x1b[1;32m>\x1b[0m ");
+        }
+        io::stdout().flush().unwrap();
+
+        let mut input = String::new();
+        match stdin.lock().read_line(&mut input) {
+            Ok(0) => break, // EOF
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!("Input error: {e}");
+                break;
+            }
+        }
+
+        let input = input.trim();
+        if input.is_empty() {
+            continue;
+        }
+
+        match input {
+            "/quit" | "/exit" | "/q" => break,
+            "/help" => {
+                println!("Commands:");
+                println!("  /quit, /exit, /q  - Exit");
+                println!("  /help             - Show this help");
+                println!("  /provider         - Show current provider info");
+                continue;
+            }
+            "/provider" => {
+                println!("Provider: {}", agent.provider_info());
+                continue;
+            }
+            _ => {}
+        }
+
+        if let Err(e) = agent.chat(input).await {
+            eprintln!("\x1b[31mError: {e}\x1b[0m");
+        }
+    }
+
+    #[cfg(feature = "tui")]
+    {
+        let mut app = tui::App::new();
+        app.model = agent.model().to_string();
+        app.provider = agent.provider_id().to_string();
+        app.session_name = "main".to_string();
+        app.start_time = std::time::Instant::now() - std::time::Duration::from_secs_f64(agent.elapsed_secs());
+        tui::print_exit_summary(&app);
+    }
+
+    #[cfg(not(feature = "tui"))]
+    {
+        println!("\x1b[2mGoodbye.\x1b[0m");
+    }
+}
+
+fn bridge_mode() -> io::Result<()> {
     let stdin = io::stdin();
     let mut stdout = io::stdout();
 

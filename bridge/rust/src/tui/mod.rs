@@ -1,4 +1,7 @@
 use std::io::{self, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread;
 use std::time::{Duration, Instant};
 
 // ANSI color codes
@@ -8,21 +11,20 @@ const DIM: &str = "\x1b[2m";
 const ITALIC: &str = "\x1b[3m";
 const UNDERLINE: &str = "\x1b[4m";
 const STRIKETHROUGH: &str = "\x1b[9m";
-const BLACK: &str = "\x1b[30m";
 const RED: &str = "\x1b[31m";
 const GREEN: &str = "\x1b[32m";
 const YELLOW: &str = "\x1b[33m";
-const BLUE: &str = "\x1b[34m";
-const MAGENTA: &str = "\x1b[35m";
 const CYAN: &str = "\x1b[36m";
 const WHITE: &str = "\x1b[37m";
-const BRIGHT_BLACK: &str = "\x1b[90m";
-const BRIGHT_GREEN: &str = "\x1b[92m";
-const BRIGHT_YELLOW: &str = "\x1b[93m";
 const BRIGHT_CYAN: &str = "\x1b[96m";
 
 // Coral color (true color)
 const CORAL: &str = "\x1b[38;2;255;127;80m";
+
+// Braille spinner frames — Core Pulse pattern
+const SPINNER_FRAMES: &[&str] = &["\u{2800}\u{2836}\u{2800}", "\u{2830}\u{28ff}\u{2806}", "\u{283e}\u{28ff}\u{2837}", "\u{283e}\u{2809}\u{2837}", "\u{28cf}\u{2809}\u{2839}", "\u{2801}\u{2800}\u{2808}", "\u{2800}\u{2836}\u{2800}"];
+const SPINNER_MSG: &str = "Zeroing in";
+const SPINNER_INTERVAL_MS: u64 = 120;
 
 /// Response style for agent output
 #[derive(Debug, Clone, PartialEq)]
@@ -162,55 +164,33 @@ impl UserProfile {
 
 /// TUI application state
 pub struct App {
+    pub model: String,
+    pub provider: String,
+    pub session_name: String,
     pub messages: Vec<Message>,
     pub activity_log: Vec<ActivityEntry>,
-    pub input: String,
-    pub input_cursor: usize,
+    pub start_time: Instant,
+    pub terminal_width: usize,
+    pub response_style: ResponseStyle,
+    pub profile: UserProfile,
     pub input_history: Vec<String>,
     pub history_index: Option<usize>,
-    pub show_activity: bool,
-    pub response_style: ResponseStyle,
-    pub model: String,
-    pub session_name: String,
-    pub token_count: usize,
-    pub is_streaming: bool,
-    pub current_stream: String,
-    pub stream_line_buffer: String,
-    pub stream_is_first_line: bool,
-    pub thinking_text: String,
-    pub thinking_visible: bool,
-    pub approval: Option<ApprovalRequest>,
-    pub should_quit: bool,
-    pub profile: UserProfile,
-    pub terminal_width: usize,
-    pub thinking_start: Option<Instant>,
 }
 
 impl App {
     pub fn new() -> Self {
         Self {
+            model: String::from("unknown"),
+            provider: String::from("unknown"),
+            session_name: String::from("main"),
             messages: Vec::new(),
             activity_log: Vec::new(),
-            input: String::new(),
-            input_cursor: 0,
+            start_time: Instant::now(),
+            terminal_width: 80,
+            response_style: ResponseStyle::Concise,
+            profile: UserProfile::new(),
             input_history: Vec::new(),
             history_index: None,
-            show_activity: true,
-            response_style: ResponseStyle::Concise,
-            model: String::from("unknown"),
-            session_name: String::from("main"),
-            token_count: 0,
-            is_streaming: false,
-            current_stream: String::new(),
-            stream_line_buffer: String::new(),
-            stream_is_first_line: true,
-            thinking_text: String::new(),
-            thinking_visible: false,
-            approval: None,
-            should_quit: false,
-            profile: UserProfile::new(),
-            terminal_width: 80,
-            thinking_start: None,
         }
     }
 
@@ -261,7 +241,7 @@ impl App {
     }
 }
 
-// ─── Rendering ───────────────────────────────────────────────────────────────
+// ─── ANSI Helpers ────────────────────────────────────────────────────────────
 
 /// Clear the screen and move cursor to top
 pub fn clear_screen() {
@@ -285,192 +265,246 @@ pub fn clear_to_end() {
 
 /// Get terminal size (columns, rows)
 pub fn get_terminal_size() -> (usize, usize) {
-    // Default to 80x24 if we can't detect
     (80, 24)
 }
 
-/// Print the welcome banner
-pub fn print_banner() {
-    println!();
-    println!("  {BOLD}{WHITE}██    ██  ███████  ██████   ██████  {CORAL}-{WHITE}  █████  ██████  ███████ ███    ██ ████████ {RESET}");
-    println!("  {BOLD}{WHITE}██    ██  ██      ██    ██ ██    ██ {CORAL}-{WHITE} ██   ██ ██   ██ ██      ████   ██    ██    {RESET}");
-    println!("  {BOLD}{WHITE}██    ██  █████   ██    ██ ██    ██ {CORAL}-{WHITE} ███████ ██████  █████   ██ ██  ██    ██    {RESET}");
-    println!("  {BOLD}{WHITE} ██  ██   ██      ██    ██ ██    ██ {CORAL}-{WHITE} ██   ██ ██   ██ ██      ██  ██ ██    ██    {RESET}");
-    println!("  {BOLD}{WHITE}  ████    ███████  ██████   ██████  {CORAL}-{WHITE} ██   ██ ██   ██ ███████ ██   ████    ██    {RESET}");
-    println!();
-    println!("  {DIM}personal AI assistant for developers{RESET}");
-    println!();
+// ─── Braille Spinner ─────────────────────────────────────────────────────────
+
+/// Start the braille spinner in a background thread.
+/// Returns (JoinHandle, stop_flag) — set stop_flag to true then join to stop.
+pub fn start_spinner() -> (thread::JoinHandle<()>, Arc<AtomicBool>) {
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_clone = Arc::clone(&stop);
+    let handle = thread::spawn(move || {
+        let start = Instant::now();
+        let mut frame_idx: usize = 0;
+        while !stop_clone.load(Ordering::Relaxed) {
+            let elapsed = start.elapsed().as_secs();
+            let frame = SPINNER_FRAMES[frame_idx % SPINNER_FRAMES.len()];
+            print!("\r  {} {}{}... ({}s){RESET}   ", frame, CYAN, SPINNER_MSG, elapsed);
+            io::stdout().flush().unwrap();
+            frame_idx = frame_idx.wrapping_add(1);
+            thread::sleep(Duration::from_millis(SPINNER_INTERVAL_MS));
+        }
+    });
+    (handle, stop)
 }
 
-/// Print the status line
-pub fn print_status(app: &App) {
-    let style_name = app.response_style.name();
-    println!("  {DIM}model: {CYAN}{}{RESET}{DIM} | tokens: {} | session: {} | style: {}{RESET}",
-        app.model, app.token_count, app.session_name, style_name);
-    println!("  {DIM}/help for commands · Tab to toggle activity · Ctrl+C to quit{RESET}");
-    println!();
+/// Stop the spinner thread and clear the spinner line.
+pub fn stop_spinner(handle: thread::JoinHandle<()>, stop: Arc<AtomicBool>) {
+    stop.store(true, Ordering::Relaxed);
+    let _ = handle.join();
+    clear_line();
+    print!("\r");
+    io::stdout().flush().unwrap();
 }
 
-/// Print the user prompt
-pub fn print_prompt(app: &App) {
-    let name = if app.profile.name.is_empty() {
-        "YOU".to_string()
+// ─── Status Bar (Hermes-style) ───────────────────────────────────────────────
+
+/// Print the Hermes-style status bar:
+///  model-name │ provider │ N msgs │ X.Xs
+pub fn print_status_bar(app: &App) {
+    let msg_count = app.messages.len();
+    let elapsed = app.start_time.elapsed().as_secs_f64();
+    let elapsed_str = if elapsed >= 60.0 {
+        format!("{}m {:.0}s", (elapsed / 60.0) as u64, elapsed % 60.0)
     } else {
-        app.profile.name.to_uppercase()
+        format!("{:.1}s", elapsed)
     };
+    println!(
+        "  {DIM} {BRIGHT_CYAN}{}{RESET}{DIM} \u{2502} {} \u{2502} {} msgs \u{2502} {}{RESET}",
+        app.model, app.provider, msg_count, elapsed_str
+    );
+}
+
+// ─── Tool Call Display (Hermes-style) ────────────────────────────────────────
+
+/// Get the emoji icon for a tool name.
+fn tool_icon(name: &str) -> &'static str {
+    match name {
+        "read_file" => "\u{1f4c4}",   // page facing up
+        "write_file" => "\u{270f}\u{fe0f}",  // pencil
+        "edit_file" => "\u{270f}\u{fe0f}",   // pencil
+        "shell" => "\u{1f4bb}",       // laptop
+        "glob" => "\u{1f50d}",        // magnifying glass
+        _ => "\u{2699}\u{fe0f}",      // gear
+    }
+}
+
+/// Print a single Hermes-style tool call line:
+///   name args_preview (X.Xs)
+pub fn print_tool_line(name: &str, args_preview: &str, status: &ToolStatus, elapsed: Option<Duration>) {
+    let (icon, color) = match status {
+        ToolStatus::Running => (tool_icon(name), YELLOW),
+        ToolStatus::Success => (tool_icon(name), GREEN),
+        ToolStatus::Error => ("\u{2717}", RED),
+    };
+    let elapsed_str = elapsed
+        .map(|d| format!(" ({:.1}s)", d.as_secs_f64()))
+        .unwrap_or_default();
+    let preview = if args_preview.len() > 40 {
+        format!("{}...", &args_preview[..37])
+    } else {
+        args_preview.to_string()
+    };
+    println!(
+        "  {DIM}  \u{250a} {color}{icon} {name} {DIM}`{preview}`{elapsed_str}{RESET}"
+    );
+}
+
+// ─── Conversation Blocks ─────────────────────────────────────────────────────
+
+/// Default box width for conversation blocks.
+const BOX_WIDTH: usize = 60;
+
+/// Print a user message in a box:
+///   +-- You ----...----+
+///   | message text     |
+///   +------...---------+
+pub fn print_user_block(text: &str) {
+    let width = BOX_WIDTH;
+    let title = "You";
+    let top_pad = width.saturating_sub(title.len() + 4);
+    println!(
+        "\n  {CORAL}{BOLD}\u{256d}\u{2500} {title} {}\u{256e}{RESET}",
+        "\u{2500}".repeat(top_pad)
+    );
+    for line in text.lines() {
+        let vis_len = visible_len(line);
+        let pad = width.saturating_sub(vis_len).saturating_sub(1);
+        println!(
+            "  {CORAL}\u{2502}{RESET} {}{}{CORAL}\u{2502}{RESET}",
+            line,
+            " ".repeat(pad)
+        );
+    }
+    println!(
+        "  {CORAL}{BOLD}\u{2570}{}\u{256f}{RESET}",
+        "\u{2500}".repeat(width)
+    );
+}
+
+/// Print an agent response in a box with markdown rendering inside.
+pub fn print_agent_block(text: &str) {
+    let width = BOX_WIDTH;
+    let title = "ZERO";
+    let top_pad = width.saturating_sub(title.len() + 4);
+    println!(
+        "\n  {CYAN}{BOLD}\u{256d}\u{2500} {title} {}\u{256e}{RESET}",
+        "\u{2500}".repeat(top_pad)
+    );
+    for line in text.lines() {
+        let rendered = render_inline(line);
+        let vis = visible_len(&rendered);
+        let pad = width.saturating_sub(vis).saturating_sub(1);
+        println!(
+            "  {CYAN}\u{2502}{RESET} {}{}{CYAN}\u{2502}{RESET}",
+            rendered,
+            " ".repeat(pad)
+        );
+    }
+    println!(
+        "  {CYAN}{BOLD}\u{2570}{}\u{256f}{RESET}",
+        "\u{2500}".repeat(width)
+    );
+}
+
+/// Print a dim system message in a box.
+pub fn print_system_block(text: &str) {
+    let width = BOX_WIDTH;
+    let title = "SYS";
+    let top_pad = width.saturating_sub(title.len() + 4);
+    println!(
+        "\n  {DIM}\u{256d}\u{2500} {title} {}\u{256e}{RESET}",
+        "\u{2500}".repeat(top_pad)
+    );
+    for line in text.lines() {
+        let vis = visible_len(line);
+        let pad = width.saturating_sub(vis).saturating_sub(1);
+        println!(
+            "  {DIM}\u{2502}{RESET} {DIM}{}{}{DIM}\u{2502}{RESET}",
+            line,
+            " ".repeat(pad)
+        );
+    }
+    println!(
+        "  {DIM}\u{2570}{}\u{256f}{RESET}",
+        "\u{2500}".repeat(width)
+    );
+}
+
+/// Print the user prompt indicator.
+pub fn print_prompt(_app: &App) {
     print!("  {CORAL}{BOLD}> {RESET}");
     io::stdout().flush().unwrap();
 }
 
-/// Print a user message
-pub fn print_user_message(text: &str) {
-    let name = "YOU";
-    println!("  {CORAL}{BOLD}{name:10}{RESET}{text}");
-    println!();
-}
+// ─── Session Summary ─────────────────────────────────────────────────────────
 
-/// Print an agent message with markdown rendering
-pub fn print_agent_message(text: &str) {
-    print!("  {CYAN}{BOLD}ZERO     {RESET}");
-    render_markdown(text, 10);
-    println!();
-}
-
-/// Print a system message
-pub fn print_system_message(text: &str) {
-    println!("  {DIM}SYS     {text}{RESET}");
-    println!();
-}
-
-/// Print a tool call in progress
-pub fn print_tool_call(name: &str, status: &ToolStatus) {
-    let (icon, color) = match status {
-        ToolStatus::Running => ("⏳", YELLOW),
-        ToolStatus::Success => ("✓", GREEN),
-        ToolStatus::Error => ("✗", RED),
+/// Print a compact session summary after each exchange:
+///  model-name │ N msgs │ X.Xs
+pub fn print_session_summary(app: &App) {
+    let msg_count = app.messages.len();
+    let elapsed = app.start_time.elapsed().as_secs_f64();
+    let elapsed_str = if elapsed >= 60.0 {
+        format!("{}m {:.0}s", (elapsed / 60.0) as u64, elapsed % 60.0)
+    } else {
+        format!("{:.1}s", elapsed)
     };
-    println!("  {DIM}  {color}{icon} {name}{RESET}");
+    println!(
+        "\n  {DIM} {BRIGHT_CYAN}{}{RESET}{DIM} \u{2502} {} msgs \u{2502} {}{RESET}",
+        app.model, msg_count, elapsed_str
+    );
 }
 
-/// Print tool completion with elapsed time (Hermes-style)
-pub fn print_tool_completion(name: &str, status: &ToolStatus, elapsed: Duration) {
-    let (icon, color) = match status {
-        ToolStatus::Running => ("⏳", YELLOW),
-        ToolStatus::Success => ("✓", GREEN),
-        ToolStatus::Error => ("✗", RED),
-    };
-    let verb = match name {
-        "read_file" => "read",
-        "write_file" => "write",
-        "edit_file" => "edit",
-        "shell" => "run",
-        "glob" => "search",
-        _ => name,
-    };
-    println!("  {DIM}  {color}{icon} {verb:9}{RESET}{DIM}  {:.1}s{RESET}", elapsed.as_secs_f64());
-}
+// ─── Exit Summary (Hermes-style) ─────────────────────────────────────────────
 
-/// Print tool output (truncated)
-pub fn print_tool_output(output: &str, max_lines: usize) {
-    let lines: Vec<&str> = output.lines().collect();
-    let shown = lines.len().min(max_lines);
-    for line in &lines[..shown] {
-        println!("  {DIM}    | {line}{RESET}");
-    }
-    if lines.len() > shown {
-        println!("  {DIM}    | ... ({} more lines){RESET}", lines.len() - shown);
-    }
-}
+/// Print the exit summary when the session ends.
+pub fn print_exit_summary(app: &App) {
+    let duration = app.start_time.elapsed();
+    let total_secs = duration.as_secs();
+    let minutes = total_secs / 60;
+    let seconds = total_secs % 60;
+    let duration_str = format!("{}m {}s", minutes, seconds);
 
-/// Print a file diff
-pub fn print_diff(old: &str, new: &str, filename: &str) {
-    println!("  {DIM}  ── diff {filename} ──{RESET}");
-    let old_lines: Vec<&str> = old.lines().collect();
-    let new_lines: Vec<&str> = new.lines().collect();
-
-    // Simple line-by-line diff
-    let max_len = old_lines.len().max(new_lines.len());
-    for i in 0..max_len {
-        let old_line = old_lines.get(i).unwrap_or(&"");
-        let new_line = new_lines.get(i).unwrap_or(&"");
-
-        if old_line != new_line {
-            if !old_line.is_empty() {
-                println!("  {DIM}    {RED}- {old_line}{RESET}");
-            }
-            if !new_line.is_empty() {
-                println!("  {DIM}    {GREEN}+ {new_line}{RESET}");
-            }
-        } else {
-            println!("  {DIM}      {old_line}{RESET}");
-        }
-    }
-}
-
-/// Print thinking indicator
-pub fn print_thinking(start: Instant) {
-    let elapsed = start.elapsed().as_millis() / 400;
-    let dots = ".".repeat((elapsed % 4) as usize + 1);
-    print!("\r  {DIM}💭 thinking{dots:4}{RESET}");
-    io::stdout().flush().unwrap();
-}
-
-/// Print the approval modal
-pub fn print_approval(approval: &ApprovalRequest) {
-    let risk_color = match approval.risk_level.as_str() {
-        "Safe" => GREEN,
-        "Mutating" => YELLOW,
-        "Destructive" => RED,
-        "Blocked" => RED,
-        _ => WHITE,
-    };
+    let total_msgs = app.messages.len();
+    let user_msgs = app.messages.iter().filter(|m| m.role == MessageRole::User).count();
+    let tool_calls: usize = app.messages.iter().map(|m| m.tool_calls.len()).sum();
 
     println!();
-    println!("  {YELLOW}{BOLD}╭─ Tool Approval Required ─────────────────────────╮{RESET}");
-    println!("  {YELLOW}│{RESET}                                                   {YELLOW}│{RESET}");
-    println!("  {YELLOW}│{RESET}  Tool: {BOLD}{}{RESET}", approval.tool_name);
-    println!("  {YELLOW}│{RESET}  Risk: {risk_color}{}{RESET}", approval.risk_level);
-    println!("  {YELLOW}│{RESET}                                                   {YELLOW}│{RESET}");
-    println!("  {YELLOW}│{RESET}  {}", approval.description);
-    println!("  {YELLOW}│{RESET}                                                   {YELLOW}│{RESET}");
-    println!("  {YELLOW}│{RESET}  Input:");
-    for line in approval.input_preview.lines().take(10) {
-        println!("  {YELLOW}│{RESET}  {CYAN}{line}{RESET}");
-    }
-    println!("  {YELLOW}│{RESET}                                                   {YELLOW}│{RESET}");
-    println!("  {YELLOW}│{RESET}  {BOLD}[y]{RESET}es  {BOLD}[n]{RESET}o  {BOLD}[a]{RESET}lways  {BOLD}[v]{RESET}iew details  {DIM}[Esc]{RESET} cancel");
-    println!("  {YELLOW}╰───────────────────────────────────────────────────╯{RESET}");
-    println!();
-}
-
-/// Print the activity pane
-pub fn print_activity(app: &App) {
-    if !app.show_activity {
-        return;
-    }
-
-    println!("  {DIM}── Activity ──────────────────────────────────────{RESET}");
-    let start = app.activity_log.len().saturating_sub(10);
-    for entry in app.activity_log.iter().skip(start) {
-        let (icon, color) = match entry.status {
-            ToolStatus::Running => ("⏳", YELLOW),
-            ToolStatus::Success => ("✓", GREEN),
-            ToolStatus::Error => ("✗", RED),
-        };
-        let elapsed_str = entry.elapsed
-            .map(|d| format!(" {:.1}s", d.as_secs_f64()))
-            .unwrap_or_default();
-        println!("  {DIM}  {color}{icon} {}{elapsed_str}{RESET}", entry.tool_name);
-    }
-    if app.activity_log.is_empty() {
-        println!("  {DIM}  No activity yet{RESET}");
-    }
+    println!("  {DIM}Session: {}{RESET}", app.session_name);
+    println!("  {DIM}Duration: {}{RESET}", duration_str);
+    println!(
+        "  {DIM}Messages: {} ({} user, {} tool calls){RESET}",
+        total_msgs, user_msgs, tool_calls
+    );
     println!();
 }
 
 // ─── Markdown Rendering ──────────────────────────────────────────────────────
 
+/// Calculate the visible length of a string (ignoring ANSI escape sequences).
+fn visible_len(s: &str) -> usize {
+    let mut len = 0;
+    let mut in_escape = false;
+    for ch in s.chars() {
+        if ch == '\x1b' {
+            in_escape = true;
+            continue;
+        }
+        if in_escape {
+            if ch == 'm' {
+                in_escape = false;
+            }
+            continue;
+        }
+        len += 1;
+    }
+    len
+}
+
 /// Render markdown text with ANSI formatting
+#[allow(unused_assignments)]
 pub fn render_markdown(text: &str, indent: usize) {
     let indent_str = " ".repeat(indent);
     let mut in_code_block = false;
@@ -513,7 +547,7 @@ pub fn render_markdown(text: &str, indent: usize) {
 
         // Horizontal rule
         if line.trim() == "---" || line.trim() == "***" {
-            println!("{indent_str}{DIM}────────────────────────────────────────────────{RESET}");
+            println!("{indent_str}{DIM}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}{RESET}");
             continue;
         }
 
@@ -535,7 +569,7 @@ pub fn render_markdown(text: &str, indent: usize) {
         }
 
         // Ordered list
-        if line.len() > 2 && line.chars().nth(0).map_or(false, |c| c.is_ascii_digit()) {
+        if line.len() > 2 && line.chars().next().map_or(false, |c| c.is_ascii_digit()) {
             if let Some(pos) = line.find(". ") {
                 let num = &line[..pos];
                 let content = &line[pos + 2..];
@@ -654,9 +688,10 @@ pub fn read_input() -> io::Result<String> {
 
 /// Read a password (masked input)
 pub fn read_password() -> io::Result<String> {
-    // For now, just read normally (masking requires raw terminal mode)
     read_input()
 }
+
+// ─── Help & Info ─────────────────────────────────────────────────────────────
 
 /// Print the help menu
 pub fn print_help() {
@@ -680,11 +715,11 @@ pub fn print_help() {
 pub fn print_status_info(app: &App) {
     println!();
     println!("  {BOLD}{WHITE}Status:{RESET}");
-    println!("  {DIM}Model:   {CYAN}{}{RESET}", app.model);
-    println!("  {DIM}Session: {}{RESET}", app.session_name);
-    println!("  {DIM}Style:   {}{RESET}", app.response_style.name());
-    println!("  {DIM}Tokens:  {}{RESET}", app.token_count);
-    println!("  {DIM}Messages:{}{RESET}", app.messages.len());
+    println!("  {DIM}Model:    {CYAN}{}{RESET}", app.model);
+    println!("  {DIM}Provider: {}{RESET}", app.provider);
+    println!("  {DIM}Session:  {}{RESET}", app.session_name);
+    println!("  {DIM}Style:    {}{RESET}", app.response_style.name());
+    println!("  {DIM}Messages: {}{RESET}", app.messages.len());
     println!();
 }
 
@@ -708,42 +743,30 @@ pub fn print_profile(profile: &UserProfile) {
     println!();
 }
 
-// ─── Streaming ───────────────────────────────────────────────────────────────
+/// Print the approval modal
+pub fn print_approval(approval: &ApprovalRequest) {
+    let risk_color = match approval.risk_level.as_str() {
+        "Safe" => GREEN,
+        "Mutating" => YELLOW,
+        "Destructive" => RED,
+        "Blocked" => RED,
+        _ => WHITE,
+    };
 
-/// Process a streaming chunk
-pub fn process_stream_chunk(app: &mut App, chunk: &str) {
-    for ch in chunk.chars() {
-        if ch == '\n' {
-            // Line complete - print with formatting
-            if app.stream_is_first_line {
-                print!("  {CYAN}{BOLD}ZERO     {RESET}");
-                app.stream_is_first_line = false;
-            } else {
-                print!("  {DIM}        {RESET}");
-            }
-            render_markdown(&app.stream_line_buffer, 10);
-            app.stream_line_buffer.clear();
-        } else {
-            app.stream_line_buffer.push(ch);
-            // Print raw character for immediate feedback
-            print!("{ch}");
-            io::stdout().flush().unwrap();
-        }
+    println!();
+    println!("  {YELLOW}{BOLD}\u{256d}\u{2500} Tool Approval Required {}\u{256e}{RESET}", "\u{2500}".repeat(35));
+    println!("  {YELLOW}\u{2502}{RESET}                                                   {YELLOW}\u{2502}{RESET}");
+    println!("  {YELLOW}\u{2502}{RESET}  Tool: {BOLD}{}{RESET}", approval.tool_name);
+    println!("  {YELLOW}\u{2502}{RESET}  Risk: {risk_color}{}{RESET}", approval.risk_level);
+    println!("  {YELLOW}\u{2502}{RESET}                                                   {YELLOW}\u{2502}{RESET}");
+    println!("  {YELLOW}\u{2502}{RESET}  {}", approval.description);
+    println!("  {YELLOW}\u{2502}{RESET}                                                   {YELLOW}\u{2502}{RESET}");
+    println!("  {YELLOW}\u{2502}{RESET}  Input:");
+    for line in approval.input_preview.lines().take(10) {
+        println!("  {YELLOW}\u{2502}{RESET}  {CYAN}{line}{RESET}");
     }
-}
-
-/// Finish streaming
-pub fn finish_streaming(app: &mut App) {
-    if !app.stream_line_buffer.is_empty() {
-        if app.stream_is_first_line {
-            print!("  {CYAN}{BOLD}ZERO     {RESET}");
-        } else {
-            print!("  {DIM}        {RESET}");
-        }
-        render_markdown(&app.stream_line_buffer, 10);
-        app.stream_line_buffer.clear();
-    }
-    app.is_streaming = false;
-    app.stream_is_first_line = true;
+    println!("  {YELLOW}\u{2502}{RESET}                                                   {YELLOW}\u{2502}{RESET}");
+    println!("  {YELLOW}\u{2502}{RESET}  {BOLD}[y]{RESET}es  {BOLD}[n]{RESET}o  {BOLD}[a]{RESET}lways  {BOLD}[v]{RESET}iew details  {DIM}[Esc]{RESET} cancel");
+    println!("  {YELLOW}\u{2570}{}\u{256f}{RESET}", "\u{2500}".repeat(51));
     println!();
 }

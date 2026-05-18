@@ -1,8 +1,21 @@
-// Zero-Agent entrypoint.
-// The direct Windows backend is intentionally kept primitive-only for now.
-// Core shapes live in modules and will be exercised once the backend supports them
-// or through the Rust bridge boundary.
+use core.types
+use core.config
+use core.session
+use core.events
+use core.policy
+use core.agent
+use tools.registry
+use providers.registry
 
 pub fun main(world: World) -> Void raises {
-    check world.out.write("Zero-Agent core bootstrap ready\n")
+    let provider = defaultProvider()
+
+    check world.out.write("ZERO Agent\n")
+    check world.out.write("Provider: openrouter\n")
+    check world.out.write("Model: anthropic/claude-sonnet-4\n")
+
+    let tool = readFileTool()
+    check world.out.write("Tool: read_file\n")
+
+    check world.out.write("Agent ready\n")
 }

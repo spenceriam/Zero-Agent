@@ -1,5 +1,4 @@
 use core.types
-use core.policy
 
 pub shape Tool {
     name: String,
@@ -8,65 +7,26 @@ pub shape Tool {
     input_schema: String,
 }
 
-pub shape ToolRegistry {
-    tools: String,
-}
-
 pub fun needsApproval(tool: Tool) -> Bool {
-    let decision = policy.decisionForRisk(tool.risk)
-    return decision == PermissionDecision.Ask
+    return false
 }
 
 pub fun readFileTool() -> Tool {
-    return Tool {
-        name: "read_file",
-        description: "Read a local file",
-        risk: RiskLevel.Safe,
-        input_schema: "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}",
-    }
+    return Tool { name: "read_file", description: "Read file contents", risk: RiskLevel.Safe, input_schema: "path:string" }
 }
 
 pub fun writeFileTool() -> Tool {
-    return Tool {
-        name: "write_file",
-        description: "Write content to a local file",
-        risk: RiskLevel.Mutating,
-        input_schema: "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"contents\":{\"type\":\"string\"}},\"required\":[\"path\",\"contents\"]}",
-    }
+    return Tool { name: "write_file", description: "Write file contents", risk: RiskLevel.Mutating, input_schema: "path:string,contents:string" }
 }
 
 pub fun editFileTool() -> Tool {
-    return Tool {
-        name: "edit_file",
-        description: "Edit a local file with search and replace",
-        risk: RiskLevel.Mutating,
-        input_schema: "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"old_string\":{\"type\":\"string\"},\"new_string\":{\"type\":\"string\"}},\"required\":[\"path\",\"old_string\",\"new_string\"]}",
-    }
+    return Tool { name: "edit_file", description: "Edit file with search-replace", risk: RiskLevel.Mutating, input_schema: "path:string,old_string:string,new_string:string" }
 }
 
 pub fun shellTool() -> Tool {
-    return Tool {
-        name: "shell",
-        description: "Run a shell command",
-        risk: RiskLevel.Mutating,
-        input_schema: "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"}},\"required\":[\"command\"]}",
-    }
+    return Tool { name: "shell", description: "Run shell command", risk: RiskLevel.Mutating, input_schema: "command:string" }
 }
 
 pub fun globTool() -> Tool {
-    return Tool {
-        name: "glob",
-        description: "Find files matching a pattern",
-        risk: RiskLevel.Safe,
-        input_schema: "{\"type\":\"object\",\"properties\":{\"pattern\":{\"type\":\"string\"}},\"required\":[\"pattern\"]}",
-    }
-}
-
-pub fun grepTool() -> Tool {
-    return Tool {
-        name: "grep",
-        description: "Search file contents with regex",
-        risk: RiskLevel.Safe,
-        input_schema: "{\"type\":\"object\",\"properties\":{\"pattern\":{\"type\":\"string\"}},\"required\":[\"pattern\"]}",
-    }
+    return Tool { name: "glob", description: "Find files by pattern", risk: RiskLevel.Safe, input_schema: "pattern:string" }
 }

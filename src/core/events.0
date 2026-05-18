@@ -3,11 +3,9 @@ use core.types
 pub enum AgentEventKind {
     UserInput,
     ProviderText,
-    ProviderThinking,
     AssistantText,
     ToolCall,
     ToolResult,
-    ToolApproval,
     Status,
     Error,
     Done,
@@ -17,45 +15,32 @@ pub shape AgentEvent {
     kind: AgentEventKind,
     text: String,
     tool_name: String,
-    source: InterfaceKind,
 }
 
-pub fun userInput(text: String, source: InterfaceKind) -> AgentEvent {
-    return AgentEvent { kind: AgentEventKind.UserInput, text: text, tool_name: "", source: source }
+pub fun makeUserInput(text: String) -> AgentEvent {
+    return AgentEvent { kind: AgentEventKind.UserInput, text: text, tool_name: "" }
 }
 
-pub fun providerText(text: String) -> AgentEvent {
-    return AgentEvent { kind: AgentEventKind.ProviderText, text: text, tool_name: "", source: InterfaceKind.Tui }
+pub fun makeAssistantText(text: String) -> AgentEvent {
+    return AgentEvent { kind: AgentEventKind.AssistantText, text: text, tool_name: "" }
 }
 
-pub fun providerThinking(text: String) -> AgentEvent {
-    return AgentEvent { kind: AgentEventKind.ProviderThinking, text: text, tool_name: "", source: InterfaceKind.Tui }
+pub fun makeToolCall(name: String, text: String) -> AgentEvent {
+    return AgentEvent { kind: AgentEventKind.ToolCall, text: text, tool_name: name }
 }
 
-pub fun assistantText(text: String) -> AgentEvent {
-    return AgentEvent { kind: AgentEventKind.AssistantText, text: text, tool_name: "", source: InterfaceKind.Tui }
+pub fun makeToolResult(name: String, text: String) -> AgentEvent {
+    return AgentEvent { kind: AgentEventKind.ToolResult, text: text, tool_name: name }
 }
 
-pub fun toolCall(name: String, text: String) -> AgentEvent {
-    return AgentEvent { kind: AgentEventKind.ToolCall, text: text, tool_name: name, source: InterfaceKind.Tui }
+pub fun makeStatus(text: String) -> AgentEvent {
+    return AgentEvent { kind: AgentEventKind.Status, text: text, tool_name: "" }
 }
 
-pub fun toolResult(name: String, text: String) -> AgentEvent {
-    return AgentEvent { kind: AgentEventKind.ToolResult, text: text, tool_name: name, source: InterfaceKind.Tui }
+pub fun makeError(text: String) -> AgentEvent {
+    return AgentEvent { kind: AgentEventKind.Error, text: text, tool_name: "" }
 }
 
-pub fun toolApproval(name: String, text: String) -> AgentEvent {
-    return AgentEvent { kind: AgentEventKind.ToolApproval, text: text, tool_name: name, source: InterfaceKind.Tui }
-}
-
-pub fun status(text: String) -> AgentEvent {
-    return AgentEvent { kind: AgentEventKind.Status, text: text, tool_name: "", source: InterfaceKind.Tui }
-}
-
-pub fun error(text: String) -> AgentEvent {
-    return AgentEvent { kind: AgentEventKind.Error, text: text, tool_name: "", source: InterfaceKind.Tui }
-}
-
-pub fun done() -> AgentEvent {
-    return AgentEvent { kind: AgentEventKind.Done, text: "", tool_name: "", source: InterfaceKind.Tui }
+pub fun makeDone() -> AgentEvent {
+    return AgentEvent { kind: AgentEventKind.Done, text: "", tool_name: "" }
 }

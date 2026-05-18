@@ -1,14 +1,10 @@
 pub shape ProviderConfig {
     id: String,
-    display_name: String,
-    api_kind: String,
+    name: String,
+    api_format: String,
     base_url: String,
-    api_key_env: String,
-}
-
-pub shape ModelConfig {
-    provider_id: String,
-    model_id: String,
+    api_key: String,
+    default_model: String,
 }
 
 pub shape ToolPolicyConfig {
@@ -17,45 +13,28 @@ pub shape ToolPolicyConfig {
     ask_before_destructive: Bool,
 }
 
+pub shape TelegramConfig {
+    bot_token: String,
+    allowed_users: String,
+}
+
 pub shape AppConfig {
     data_dir: String,
     default_provider: String,
-    default_model: String,
     tool_policy: ToolPolicyConfig,
+    telegram: TelegramConfig,
 }
 
 pub fun defaultToolPolicy() -> ToolPolicyConfig {
-    return ToolPolicyConfig {
-        allow_safe_without_prompt: true,
-        ask_before_mutating: true,
-        ask_before_destructive: true,
-    }
+    return ToolPolicyConfig { allow_safe_without_prompt: true, ask_before_mutating: true, ask_before_destructive: true }
 }
 
-pub fun defaultConfig() -> AppConfig {
-    return AppConfig {
-        data_dir: ".zero-agent",
-        default_provider: "openrouter",
-        default_model: "",
-        tool_policy: defaultToolPolicy(),
-    }
+pub fun defaultTelegram() -> TelegramConfig {
+    return TelegramConfig { bot_token: "", allowed_users: "" }
 }
 
-pub fun defaultOpenRouterProvider() -> ProviderConfig {
-    return ProviderConfig {
-        id: "openrouter",
-        display_name: "OpenRouter",
-        api_kind: "openai-compatible",
-        base_url: "https://openrouter.ai/api/v1",
-        api_key_env: "OPENROUTER_API_KEY",
-    }
-}
-
-pub fun defaultModel() -> ModelConfig {
-    return ModelConfig {
-        provider_id: "openrouter",
-        model_id: "",
-    }
+pub fun defaultProvider() -> ProviderConfig {
+    return ProviderConfig { id: "openrouter", name: "OpenRouter", api_format: "openai", base_url: "https://openrouter.ai/api/v1", api_key: "", default_model: "anthropic/claude-sonnet-4" }
 }
 
 pub fun isConfigValid(config: AppConfig) -> Bool {

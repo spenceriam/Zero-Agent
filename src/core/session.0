@@ -19,12 +19,7 @@ pub shape Session {
 }
 
 pub fun newSession(id: String, provider: String, model: String) -> Session {
-    return Session {
-        id: id,
-        title: "New session",
-        provider: provider,
-        model: model,
-    }
+    return Session { id: id, title: "New session", provider: provider, model: model }
 }
 
 pub fun userMessage(content: String) -> ChatMessage {
@@ -41,8 +36,4 @@ pub fun toolMessage(content: String, tool_name: String) -> ChatMessage {
 
 pub fun systemMessage(content: String) -> ChatMessage {
     return ChatMessage { role: MessageRole.System, content: content, tool_name: "" }
-}
-
-pub fun sessionPath(data_dir: String, session_id: String) -> String {
-    return data_dir + "/sessions/" + session_id + ".jsonl"
 }
