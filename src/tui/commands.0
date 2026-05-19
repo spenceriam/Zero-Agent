@@ -1,0 +1,99 @@
+// ─── Slash Command Registry ───────────────────────────────────────────────────
+// Sorted alphabetically. Each command has a name, short description,
+// and a kind that tells the TUI how to handle it.
+
+pub enum CommandKind {
+    Simple,
+    Interactive,
+    Toggle,
+}
+
+pub shape SlashCommand {
+    name: String,
+    description: String,
+    kind: CommandKind,
+}
+
+pub fun allCommands() -> String {
+    // Returns a comma-separated list of command names for bridge to parse.
+    // Full structured data is encoded below and used by the Zero TUI layer.
+    return "clear,config,help,jobs,memory,model,profile,provider,quit,reasoning,session,status,stop,style,tools"
+}
+
+pub fun commandDescription(name: String) -> String {
+    if name == "clear" {
+        return "Clear the current conversation scroll"
+    }
+    if name == "config" {
+        return "Show or edit agent configuration"
+    }
+    if name == "help" {
+        return "Show all available commands"
+    }
+    if name == "jobs" {
+        return "List or cancel background jobs"
+    }
+    if name == "memory" {
+        return "Show or manage saved memories"
+    }
+    if name == "model" {
+        return "Switch the active model (interactive picker)"
+    }
+    if name == "profile" {
+        return "Show or edit your user profile"
+    }
+    if name == "provider" {
+        return "List providers or change the active provider"
+    }
+    if name == "quit" {
+        return "Exit Zero-Agent"
+    }
+    if name == "reasoning" {
+        return "Set reasoning level: off | low | med | high | x-high"
+    }
+    if name == "session" {
+        return "Manage sessions: list | new | resume | delete"
+    }
+    if name == "status" {
+        return "Show current model, provider, context, and session info"
+    }
+    if name == "stop" {
+        return "Stop the current agent turn"
+    }
+    if name == "style" {
+        return "Set response style: concise | verbose | technical"
+    }
+    if name == "tools" {
+        return "List or toggle tool permissions"
+    }
+    return "Unknown command"
+}
+
+pub fun commandKind(name: String) -> CommandKind {
+    if name == "model" {
+        return CommandKind.Interactive
+    }
+    if name == "provider" {
+        return CommandKind.Interactive
+    }
+    if name == "session" {
+        return CommandKind.Interactive
+    }
+    if name == "reasoning" {
+        return CommandKind.Toggle
+    }
+    return CommandKind.Simple
+}
+
+// ─── Filter helper ────────────────────────────────────────────────────────────
+// Returns comma-separated list of commands matching the given prefix.
+pub fun filterCommands(prefix: String) -> String {
+    let all = allCommands()
+    // Bridge will implement the actual string filtering since
+    // Zero does not yet have split/join stdlib functions.
+    // This is a stub that returns all commands when prefix is empty.
+    if prefix == "" {
+        return all
+    }
+    return all
+}

@@ -1,0 +1,256 @@
+use core.types
+
+// ─── TUI Modes ────────────────────────────────────────────────────────────────
+
+pub enum TuiMode {
+    Chat,
+    Flowing,
+    ToolExecuting,
+    ApprovalPending,
+    SlashPalette,
+    ModelPicker,
+    ProviderPicker,
+}
+
+// ─── Reasoning Level ──────────────────────────────────────────────────────────
+
+pub enum ReasoningLevel {
+    Off,
+    Low,
+    Medium,
+    High,
+    ExtraHigh,
+    Thinking,
+}
+
+pub fun reasoningLabel(level: ReasoningLevel) -> String {
+    if level == ReasoningLevel.Off {
+        return ""
+    }
+    if level == ReasoningLevel.Low {
+        return "low"
+    }
+    if level == ReasoningLevel.Medium {
+        return "med"
+    }
+    if level == ReasoningLevel.High {
+        return "high"
+    }
+    if level == ReasoningLevel.ExtraHigh {
+        return "x-high"
+    }
+    if level == ReasoningLevel.Thinking {
+        return "thinking"
+    }
+    return ""
+}
+
+// ─── Status Line ─────────────────────────────────────────────────────────────
+
+pub shape StatusLine {
+    mode: TuiMode,
+    tool_name: String,
+    elapsed_ms: Int,
+    interruptible: Bool,
+}
+
+pub fun flowingStatus() -> StatusLine {
+    return StatusLine {
+        mode: TuiMode.Flowing,
+        tool_name: "",
+        elapsed_ms: 0,
+        interruptible: true,
+    }
+}
+
+pub fun toolStatus(name: String) -> StatusLine {
+    return StatusLine {
+        mode: TuiMode.ToolExecuting,
+        tool_name: name,
+        elapsed_ms: 0,
+        interruptible: true,
+    }
+}
+
+pub fun idleStatus() -> StatusLine {
+    return StatusLine {
+        mode: TuiMode.Chat,
+        tool_name: "",
+        elapsed_ms: 0,
+        interruptible: false,
+    }
+}
+
+// ─── Scroll Entries ───────────────────────────────────────────────────────────
+
+pub enum EntryKind {
+    UserMessage,
+    AgentText,
+    ThinkingBlock,
+    ToolCall,
+    ToolResult,
+    ApprovalCard,
+    MemoryFooter,
+    SystemNote,
+}
+
+pub shape ScrollEntry {
+    kind: EntryKind,
+    content: String,
+    tool_name: String,
+    truncated: Bool,
+    log_path: String,
+    elapsed_ms: Int,
+}
+
+pub fun userEntry(content: String) -> ScrollEntry {
+    return ScrollEntry {
+        kind: EntryKind.UserMessage,
+        content: content,
+        tool_name: "",
+        truncated: false,
+        log_path: "",
+        elapsed_ms: 0,
+    }
+}
+
+pub fun agentEntry(content: String) -> ScrollEntry {
+    return ScrollEntry {
+        kind: EntryKind.AgentText,
+        content: content,
+        tool_name: "",
+        truncated: false,
+        log_path: "",
+        elapsed_ms: 0,
+    }
+}
+
+pub fun thinkingEntry(content: String, truncated: Bool, log_path: String) -> ScrollEntry {
+    return ScrollEntry {
+        kind: EntryKind.ThinkingBlock,
+        content: content,
+        tool_name: "",
+        truncated: truncated,
+        log_path: log_path,
+        elapsed_ms: 0,
+    }
+}
+
+pub fun toolCallEntry(name: String, content: String, elapsed_ms: Int) -> ScrollEntry {
+    return ScrollEntry {
+        kind: EntryKind.ToolCall,
+        content: content,
+        tool_name: name,
+        truncated: false,
+        log_path: "",
+        elapsed_ms: elapsed_ms,
+    }
+}
+
+pub fun toolResultEntry(name: String, content: String, truncated: Bool, log_path: String) -> ScrollEntry {
+    return ScrollEntry {
+        kind: EntryKind.ToolResult,
+        content: content,
+        tool_name: name,
+        truncated: truncated,
+        log_path: log_path,
+        elapsed_ms: 0,
+    }
+}
+
+pub fun memoryFooterEntry(description: String, file_name: String) -> ScrollEntry {
+    return ScrollEntry {
+        kind: EntryKind.MemoryFooter,
+        content: description,
+        tool_name: file_name,
+        truncated: false,
+        log_path: "",
+        elapsed_ms: 0,
+    }
+}
+
+pub fun systemNoteEntry(content: String) -> ScrollEntry {
+    return ScrollEntry {
+        kind: EntryKind.SystemNote,
+        content: content,
+        tool_name: "",
+        truncated: false,
+        log_path: "",
+        elapsed_ms: 0,
+    }
+}
+
+// ─── Approval Modal ───────────────────────────────────────────────────────────
+
+pub enum ApprovalChoice {
+    Deny,
+    ApproveOnce,
+    ApproveSession,
+    ApproveAlways,
+}
+
+pub shape ApprovalModal {
+    tool_name: String,
+    command: String,
+    risk: RiskLevel,
+    selected: Int,
+}
+
+pub fun newApproval(tool_name: String, command: String, risk: RiskLevel) -> ApprovalModal {
+    return ApprovalModal {
+        tool_name: tool_name,
+        command: command,
+        risk: risk,
+        selected: 0,
+    }
+}
+
+// ─── Model Picker ─────────────────────────────────────────────────────────────
+
+pub shape ModelPickerState {
+    models: String,
+    provider: String,
+    selected: Int,
+    show_provider_option: Bool,
+}
+
+pub fun newModelPicker(provider: String, models: String) -> ModelPickerState {
+    return ModelPickerState {
+        models: models,
+        provider: provider,
+        selected: 0,
+        show_provider_option: true,
+    }
+}
+
+// ─── Full TUI State ───────────────────────────────────────────────────────────
+
+pub shape TuiState {
+    mode: TuiMode,
+    model: String,
+    provider: String,
+    reasoning: ReasoningLevel,
+    session_id: String,
+    status: StatusLine,
+    scroll: String,
+    approval: ApprovalModal,
+    model_picker: ModelPickerState,
+    slash_filter: String,
+    context_pct: Int,
+}
+
+pub fun newTuiState(model: String, provider: String, session_id: String) -> TuiState {
+    return TuiState {
+        mode: TuiMode.Chat,
+        model: model,
+        provider: provider,
+        reasoning: ReasoningLevel.Off,
+        session_id: session_id,
+        status: idleStatus(),
+        scroll: "",
+        approval: newApproval("", "", RiskLevel.Safe),
+        model_picker: newModelPicker(provider, ""),
+        slash_filter: "",
+        context_pct: 0,
+    }
+}

@@ -6,13 +6,25 @@ use core.policy
 use core.agent
 use tools.registry
 use providers.registry
+use tui.state
+use tui.events
+use tui.commands
 
 pub fun main(world: World) -> Void raises {
     let provider = defaultProvider()
+    let state = newTuiState(provider.default_model, provider.id, "session-001")
+
+    // Emit initial session-started event
+    let status = flowingStatus()
+    let ev = evSetStatus(status)
 
     check world.out.write("ZERO Agent\n")
-    check world.out.write("Provider: openrouter\n")
-    check world.out.write("Model: anthropic/claude-sonnet-4\n")
+    check world.out.write("Provider: ")
+    check world.out.write(provider.id)
+    check world.out.write("\n")
+    check world.out.write("Model: ")
+    check world.out.write(provider.default_model)
+    check world.out.write("\n")
 
     let tool = readFileTool()
     check world.out.write("Tool: read_file\n")

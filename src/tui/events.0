@@ -1,0 +1,145 @@
+use tui.state
+
+// ─── TUI Events ───────────────────────────────────────────────────────────────
+// These are emitted by Zero business logic and consumed by the Rust display driver.
+
+pub enum TuiEventKind {
+    AppendScroll,
+    SetStatus,
+    ShowApproval,
+    DismissApproval,
+    ShowSlashPalette,
+    HideSlashPalette,
+    ShowModelPicker,
+    HideModelPicker,
+    ShowProviderPicker,
+    ModelSelected,
+    ProviderSelected,
+    ReasoningChanged,
+    MemoryFooter,
+    SessionStarted,
+    TurnEnded,
+    Interrupted,
+    ContextUpdated,
+}
+
+pub shape TuiEvent {
+    kind: TuiEventKind,
+    entry: ScrollEntry,
+    status: StatusLine,
+    approval: ApprovalModal,
+    text: String,
+    int_value: Int,
+}
+
+// ─── Event constructors ───────────────────────────────────────────────────────
+
+pub fun evAppendScroll(entry: ScrollEntry) -> TuiEvent {
+    return TuiEvent {
+        kind: TuiEventKind.AppendScroll,
+        entry: entry,
+        status: idleStatus(),
+        approval: newApproval("", "", RiskLevel.Safe),
+        text: "",
+        int_value: 0,
+    }
+}
+
+pub fun evSetStatus(status: StatusLine) -> TuiEvent {
+    return TuiEvent {
+        kind: TuiEventKind.SetStatus,
+        entry: systemNoteEntry(""),
+        status: status,
+        approval: newApproval("", "", RiskLevel.Safe),
+        text: "",
+        int_value: 0,
+    }
+}
+
+pub fun evShowApproval(approval: ApprovalModal) -> TuiEvent {
+    return TuiEvent {
+        kind: TuiEventKind.ShowApproval,
+        entry: systemNoteEntry(""),
+        status: idleStatus(),
+        approval: approval,
+        text: "",
+        int_value: 0,
+    }
+}
+
+pub fun evDismissApproval() -> TuiEvent {
+    return TuiEvent {
+        kind: TuiEventKind.DismissApproval,
+        entry: systemNoteEntry(""),
+        status: idleStatus(),
+        approval: newApproval("", "", RiskLevel.Safe),
+        text: "",
+        int_value: 0,
+    }
+}
+
+pub fun evShowSlashPalette(filter: String) -> TuiEvent {
+    return TuiEvent {
+        kind: TuiEventKind.ShowSlashPalette,
+        entry: systemNoteEntry(""),
+        status: idleStatus(),
+        approval: newApproval("", "", RiskLevel.Safe),
+        text: filter,
+        int_value: 0,
+    }
+}
+
+pub fun evHideSlashPalette() -> TuiEvent {
+    return TuiEvent {
+        kind: TuiEventKind.HideSlashPalette,
+        entry: systemNoteEntry(""),
+        status: idleStatus(),
+        approval: newApproval("", "", RiskLevel.Safe),
+        text: "",
+        int_value: 0,
+    }
+}
+
+pub fun evShowModelPicker() -> TuiEvent {
+    return TuiEvent {
+        kind: TuiEventKind.ShowModelPicker,
+        entry: systemNoteEntry(""),
+        status: idleStatus(),
+        approval: newApproval("", "", RiskLevel.Safe),
+        text: "",
+        int_value: 0,
+    }
+}
+
+pub fun evMemoryFooter(description: String, file_name: String) -> TuiEvent {
+    return TuiEvent {
+        kind: TuiEventKind.MemoryFooter,
+        entry: memoryFooterEntry(description, file_name),
+        status: idleStatus(),
+        approval: newApproval("", "", RiskLevel.Safe),
+        text: "",
+        int_value: 0,
+    }
+}
+
+pub fun evTurnEnded(context_pct: Int) -> TuiEvent {
+    return TuiEvent {
+        kind: TuiEventKind.TurnEnded,
+        entry: systemNoteEntry(""),
+        status: idleStatus(),
+        approval: newApproval("", "", RiskLevel.Safe),
+        text: "",
+        int_value: context_pct,
+    }
+}
+
+pub fun evInterrupted() -> TuiEvent {
+    return TuiEvent {
+        kind: TuiEventKind.Interrupted,
+        entry: systemNoteEntry("Interrupted"),
+        status: idleStatus(),
+        approval: newApproval("", "", RiskLevel.Safe),
+        text: "",
+        int_value: 0,
+    }
+}
