@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-// ANSI color codes
+// ─── ANSI Color Codes ─────────────────────────────────────────────────────────
 const RESET: &str = "\x1b[0m";
 const BOLD: &str = "\x1b[1m";
 const DIM: &str = "\x1b[2m";
@@ -16,23 +16,105 @@ const GREEN: &str = "\x1b[32m";
 const YELLOW: &str = "\x1b[33m";
 const CYAN: &str = "\x1b[36m";
 const WHITE: &str = "\x1b[37m";
+const BRIGHT_WHITE: &str = "\x1b[97m";
 const BRIGHT_CYAN: &str = "\x1b[96m";
 
-// Coral color (true color)
+// Coral / accent color (true color)
 const CORAL: &str = "\x1b[38;2;255;127;80m";
 
-// Braille spinner frames — Core Pulse pattern
-const SPINNER_FRAMES: &[&str] = &["\u{2800}\u{2836}\u{2800}", "\u{2830}\u{28ff}\u{2806}", "\u{283e}\u{28ff}\u{2837}", "\u{283e}\u{2809}\u{2837}", "\u{28cf}\u{2809}\u{2839}", "\u{2801}\u{2800}\u{2808}", "\u{2800}\u{2836}\u{2800}"];
-const SPINNER_MSG: &str = "Zeroing in";
-const SPINNER_INTERVAL_MS: u64 = 120;
+// Dimmed thinking text color (dark gray)
+const THINKING_TEXT: &str = "\x1b[38;5;240m";
+// Accent for "Thinking:" title
+const THINKING_TITLE: &str = "\x1b[38;5;67m";
 
-/// Response style for agent output
+// Shimmer frames: cycles dim → white → bright_white → white → dim
+const SHIMMER_FRAMES: &[&str] = &[
+    "\x1b[38;5;240m",
+    "\x1b[38;5;243m",
+    "\x1b[38;5;246m",
+    "\x1b[38;5;249m",
+    "\x1b[38;5;252m",
+    "\x1b[38;5;255m",
+    "\x1b[38;5;252m",
+    "\x1b[38;5;249m",
+    "\x1b[38;5;246m",
+    "\x1b[38;5;243m",
+];
+const SHIMMER_INTERVAL_MS: u64 = 80;
+
+// Max lines before truncation
+const THINKING_MAX_LINES: usize = 100;
+const TOOL_RESULT_MAX_LINES: usize = 50;
+
+// ─── Status Mode ─────────────────────────────────────────────────────────────
+#[derive(Debug, Clone, PartialEq)]
+pub enum StatusMode {
+    Idle,
+    Flowing,
+    Executing(String), // tool name
+    Interrupted,
+}
+
+// ─── Approval Choice ──────────────────────────────────────────────────────────
+#[derive(Debug, Clone, PartialEq)]
+pub enum ApprovalChoice {
+    Deny,
+    ApproveOnce,
+    ApproveSession,
+    ApproveAlways,
+}
+
+// ─── Approval Modal State ─────────────────────────────────────────────────────
+#[derive(Debug, Clone)]
+pub struct ApprovalModal {
+    pub tool_name: String,
+    pub command: String,
+    pub risk_level: String,
+    pub selected: usize, // 0=Deny 1=Once 2=Session 3=Always
+}
+
+// ─── Slash Command ────────────────────────────────────────────────────────────
+#[derive(Debug, Clone)]
+pub struct SlashCommand {
+    pub name: String,
+    pub description: String,
+}
+
+// All commands alphabetically
+pub fn all_slash_commands() -> Vec<SlashCommand> {
+    vec![
+        SlashCommand { name: "clear".into(),     description: "Clear the current conversation scroll".into() },
+        SlashCommand { name: "config".into(),    description: "Show or edit agent configuration".into() },
+        SlashCommand { name: "help".into(),      description: "Show all available commands".into() },
+        SlashCommand { name: "jobs".into(),      description: "List or cancel background jobs".into() },
+        SlashCommand { name: "memory".into(),    description: "Show or manage saved memories".into() },
+        SlashCommand { name: "model".into(),     description: "Switch the active model (interactive picker)".into() },
+        SlashCommand { name: "profile".into(),   description: "Show or edit your user profile".into() },
+        SlashCommand { name: "provider".into(),  description: "List providers or change provider".into() },
+        SlashCommand { name: "quit".into(),      description: "Exit Zero-Agent".into() },
+        SlashCommand { name: "reasoning".into(), description: "Set reasoning: off | low | med | high | x-high".into() },
+        SlashCommand { name: "session".into(),   description: "Manage sessions: list | new | resume | delete".into() },
+        SlashCommand { name: "status".into(),    description: "Show model, provider, context, and session info".into() },
+        SlashCommand { name: "stop".into(),      description: "Stop the current agent turn".into() },
+        SlashCommand { name: "style".into(),     description: "Set style: concise | verbose | technical".into() },
+        SlashCommand { name: "tools".into(),     description: "List or toggle tool permissions".into() },
+    ]
+}
+
+pub fn filter_slash_commands(prefix: &str) -> Vec<SlashCommand> {
+    let p = prefix.to_lowercase();
+    all_slash_commands()
+        .into_iter()
+        .filter(|c| c.name.starts_with(&p))
+        .collect()
+}
+
+// ─── Response Style ───────────────────────────────────────────────────────────
 #[derive(Debug, Clone, PartialEq)]
 pub enum ResponseStyle {
     Concise,
     Verbose,
     Technical,
-    NonTechnical,
     Persona(String),
 }
 
@@ -42,42 +124,12 @@ impl ResponseStyle {
             ResponseStyle::Concise => "concise",
             ResponseStyle::Verbose => "verbose",
             ResponseStyle::Technical => "technical",
-            ResponseStyle::NonTechnical => "non-technical",
-            ResponseStyle::Persona(name) => name,
-        }
-    }
-
-    pub fn from_name(name: &str) -> Self {
-        match name {
-            "concise" => ResponseStyle::Concise,
-            "verbose" => ResponseStyle::Verbose,
-            "technical" => ResponseStyle::Technical,
-            "non-technical" => ResponseStyle::NonTechnical,
-            other => ResponseStyle::Persona(other.to_string()),
-        }
-    }
-
-    pub fn system_prompt(&self) -> &str {
-        match self {
-            ResponseStyle::Concise => "Be concise and direct. No fluff. Like talking to a senior engineer.",
-            ResponseStyle::Verbose => "Provide detailed explanations with context. Good for learning.",
-            ResponseStyle::Technical => "Be code-focused. Include implementation details, architecture notes.",
-            ResponseStyle::NonTechnical => "Use plain language, no jargon. Good for non-developers.",
-            ResponseStyle::Persona(_) => "Respond in the style and personality of the specified character.",
+            ResponseStyle::Persona(n) => n,
         }
     }
 }
 
-/// A message in the conversation
-#[derive(Debug, Clone)]
-pub struct Message {
-    pub role: MessageRole,
-    pub content: String,
-    pub tool_calls: Vec<ToolCall>,
-    pub thinking: Option<String>,
-    pub timestamp: Instant,
-}
-
+// ─── Message Role ─────────────────────────────────────────────────────────────
 #[derive(Debug, Clone, PartialEq)]
 pub enum MessageRole {
     User,
@@ -86,7 +138,15 @@ pub enum MessageRole {
     Tool,
 }
 
-/// A tool call displayed in the conversation
+// ─── Tool Status ──────────────────────────────────────────────────────────────
+#[derive(Debug, Clone, PartialEq)]
+pub enum ToolStatus {
+    Running,
+    Success,
+    Error,
+}
+
+// ─── Tool Call ────────────────────────────────────────────────────────────────
 #[derive(Debug, Clone)]
 pub struct ToolCall {
     pub name: String,
@@ -97,39 +157,23 @@ pub struct ToolCall {
     pub start_time: Instant,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum ToolStatus {
-    Running,
-    Success,
-    Error,
-}
-
-/// Activity log entry
+// ─── Message ─────────────────────────────────────────────────────────────────
 #[derive(Debug, Clone)]
-pub struct ActivityEntry {
-    pub tool_name: String,
-    pub status: ToolStatus,
-    pub elapsed: Option<Duration>,
+pub struct Message {
+    pub role: MessageRole,
+    pub content: String,
+    pub tool_calls: Vec<ToolCall>,
+    pub thinking: Option<String>,
     pub timestamp: Instant,
 }
 
-/// Approval request for tool execution
-#[derive(Debug, Clone)]
-pub struct ApprovalRequest {
-    pub tool_name: String,
-    pub description: String,
-    pub risk_level: String,
-    pub input_preview: String,
-}
-
-/// User profile (soul.md concept)
+// ─── User Profile ─────────────────────────────────────────────────────────────
 #[derive(Debug, Clone)]
 pub struct UserProfile {
     pub name: String,
     pub role: String,
     pub about: String,
     pub style: ResponseStyle,
-    pub persona: String,
 }
 
 impl UserProfile {
@@ -139,44 +183,26 @@ impl UserProfile {
             role: String::new(),
             about: String::new(),
             style: ResponseStyle::Concise,
-            persona: String::new(),
         }
-    }
-
-    pub fn to_soul_md(&self) -> String {
-        let mut soul = String::new();
-        if !self.name.is_empty() {
-            soul.push_str(&format!("Name: {}\n", self.name));
-        }
-        if !self.role.is_empty() {
-            soul.push_str(&format!("Role: {}\n", self.role));
-        }
-        if !self.about.is_empty() {
-            soul.push_str(&format!("About: {}\n", self.about));
-        }
-        if !self.persona.is_empty() {
-            soul.push_str(&format!("Persona: {}\n", self.persona));
-        }
-        soul.push_str(&format!("Communication style: {}\n", self.style.name()));
-        soul
     }
 }
 
-/// TUI application state
+// ─── App State ────────────────────────────────────────────────────────────────
 pub struct App {
     pub model: String,
     pub provider: String,
+    pub reasoning_label: String, // "" means off/no reasoning
     pub session_name: String,
+    pub session_id: String,
     pub messages: Vec<Message>,
-    pub activity_log: Vec<ActivityEntry>,
     pub start_time: Instant,
     pub terminal_width: usize,
     pub response_style: ResponseStyle,
     pub profile: UserProfile,
     pub input_history: Vec<String>,
     pub history_index: Option<usize>,
-    pub tokens_used: usize,
-    pub current_job: Option<String>,
+    pub context_pct: usize,
+    pub status_mode: StatusMode,
 }
 
 impl App {
@@ -184,17 +210,18 @@ impl App {
         Self {
             model: String::from("unknown"),
             provider: String::from("unknown"),
+            reasoning_label: String::new(),
             session_name: String::from("main"),
+            session_id: String::new(),
             messages: Vec::new(),
-            activity_log: Vec::new(),
             start_time: Instant::now(),
-            terminal_width: 80,
+            terminal_width: 90,
             response_style: ResponseStyle::Concise,
             profile: UserProfile::new(),
             input_history: Vec::new(),
             history_index: None,
-            tokens_used: 0,
-            current_job: None,
+            context_pct: 0,
+            status_mode: StatusMode::Idle,
         }
     }
 
@@ -209,14 +236,6 @@ impl App {
     }
 
     pub fn add_tool_call(&mut self, name: String, input: String) {
-        let entry = ActivityEntry {
-            tool_name: name.clone(),
-            status: ToolStatus::Running,
-            elapsed: None,
-            timestamp: Instant::now(),
-        };
-        self.activity_log.push(entry);
-
         if let Some(msg) = self.messages.last_mut() {
             msg.tool_calls.push(ToolCall {
                 name,
@@ -230,583 +249,480 @@ impl App {
     }
 
     pub fn update_tool_status(&mut self, name: &str, status: ToolStatus, output: Option<String>) {
-        if let Some(entry) = self.activity_log.iter_mut().rev().find(|e| e.tool_name == name) {
-            entry.status = status.clone();
-            entry.elapsed = Some(entry.timestamp.elapsed());
-        }
-
         if let Some(msg) = self.messages.last_mut() {
             if let Some(tc) = msg.tool_calls.iter_mut().rev().find(|t| t.name == name) {
+                tc.elapsed = Some(tc.start_time.elapsed());
                 tc.status = status;
                 tc.output = output;
-                tc.elapsed = Some(tc.start_time.elapsed());
             }
+        }
+    }
+
+    /// Model display string for header: "claude-3.5-sonnet (high)" or "claude-3.5-sonnet"
+    pub fn model_display(&self) -> String {
+        if self.reasoning_label.is_empty() {
+            self.model.clone()
+        } else {
+            format!("{} ({})", self.model, self.reasoning_label)
         }
     }
 }
 
-// ─── ANSI Helpers ────────────────────────────────────────────────────────────
-
-/// Clear the screen and move cursor to top
+// ─── ANSI Helpers ─────────────────────────────────────────────────────────────
 pub fn clear_screen() {
     print!("\x1b[2J\x1b[H");
 }
 
-/// Move cursor to specific position
-pub fn move_cursor(row: u16, col: u16) {
-    print!("\x1b[{};{}H", row, col);
-}
-
-/// Clear from cursor to end of line
 pub fn clear_line() {
     print!("\x1b[K");
 }
 
-/// Clear from cursor to end of screen
-pub fn clear_to_end() {
-    print!("\x1b[J");
+pub fn move_cursor(row: u16, col: u16) {
+    print!("\x1b[{};{}H", row, col);
 }
 
-/// Get terminal size (columns, rows)
 pub fn get_terminal_size() -> (usize, usize) {
-    // In a real TUI we'd use termion or similar
+    // Default; real implementation would use termios/ioctl
     (100, 30)
 }
 
-/// Render the full Hermes-style split-pane layout
-pub fn render_layout(app: &App) {
-    clear_screen();
-    let (width, _height) = get_terminal_size();
-    
-    // Header
-    print_status_bar(app);
-    println!("{}", "\u{2500}".repeat(width));
-    
-    // Split Panes: Conversation (left) | Activity (right)
-    let left_width = (width as f64 * 0.7) as usize;
-    let right_width = width - left_width - 1;
-    
-    // For a scrolling ANSI TUI, we might just print things in order,
-    // but the layout concept suggests we want to show both.
-    // Since we are in a terminal, we'll focus on a "Status-rich scroll"
-    // rather than a full fixed-position TUI for now, as that's more robust
-    // without heavy dependencies.
-    
-    for msg in &app.messages {
-        match msg.role {
-            MessageRole::User => print_user_block(&msg.content),
-            MessageRole::Assistant => {
-                print_agent_block(&msg.content);
-                for tc in &msg.tool_calls {
-                    print_tool_line(&tc.name, &tc.input, &tc.status, tc.elapsed);
-                }
-            }
-            MessageRole::System => print_system_block(&msg.content),
-            MessageRole::Tool => {} // Handled inside assistant block usually
-        }
-    }
-    
-    if let Some(job) = &app.current_job {
-        println!("\n  {DIM}Job: {}{RESET}", job);
-    }
-}
-
-// ─── Braille Spinner ─────────────────────────────────────────────────────────
-
-/// Start the braille spinner in a background thread.
-/// Returns (JoinHandle, stop_flag) — set stop_flag to true then join to stop.
-pub fn start_spinner() -> (thread::JoinHandle<()>, Arc<AtomicBool>) {
-    let stop = Arc::new(AtomicBool::new(false));
-    let stop_clone = Arc::clone(&stop);
-    let handle = thread::spawn(move || {
-        let start = Instant::now();
-        let mut frame_idx: usize = 0;
-        while !stop_clone.load(Ordering::Relaxed) {
-            let elapsed = start.elapsed().as_secs();
-            let frame = SPINNER_FRAMES[frame_idx % SPINNER_FRAMES.len()];
-            print!("\r  {} {}{}... ({}s){RESET}   ", frame, CYAN, SPINNER_MSG, elapsed);
-            io::stdout().flush().unwrap();
-            frame_idx = frame_idx.wrapping_add(1);
-            thread::sleep(Duration::from_millis(SPINNER_INTERVAL_MS));
-        }
-    });
-    (handle, stop)
-}
-
-/// Stop the spinner thread and clear the spinner line.
-pub fn stop_spinner(handle: thread::JoinHandle<()>, stop: Arc<AtomicBool>) {
-    stop.store(true, Ordering::Relaxed);
-    let _ = handle.join();
-    clear_line();
-    print!("\r");
-    io::stdout().flush().unwrap();
-}
-
-// ─── Status Bar (Hermes-style) ───────────────────────────────────────────────
-
-/// Print the Hermes-style status bar:
-///  model-name │ provider │ N msgs │ X.Xs
-pub fn print_status_bar(app: &App) {
-    let msg_count = app.messages.len();
-    let elapsed = app.start_time.elapsed().as_secs_f64();
-    let elapsed_str = if elapsed >= 60.0 {
-        format!("{}m {:.0}s", (elapsed / 60.0) as u64, elapsed % 60.0)
-    } else {
-        format!("{:.1}s", elapsed)
-    };
-    println!(
-        "  {DIM} {BRIGHT_CYAN}{}{RESET}{DIM} \u{2502} {} \u{2502} {} msgs \u{2502} {}{RESET}",
-        app.model, app.provider, msg_count, elapsed_str
-    );
-}
-
-// ─── Tool Call Display (Hermes-style) ────────────────────────────────────────
-
-/// Get the emoji icon for a tool name.
-fn tool_icon(name: &str) -> &'static str {
-    match name {
-        "read_file" => "\u{1f4c4}",   // page facing up
-        "write_file" => "\u{270f}\u{fe0f}",  // pencil
-        "edit_file" => "\u{270f}\u{fe0f}",   // pencil
-        "shell" => "\u{1f4bb}",       // laptop
-        "glob" => "\u{1f50d}",        // magnifying glass
-        _ => "\u{2699}\u{fe0f}",      // gear
-    }
-}
-
-/// Print a single Hermes-style tool call line:
-///   name args_preview (X.Xs)
-pub fn print_tool_line(name: &str, args_preview: &str, status: &ToolStatus, elapsed: Option<Duration>) {
-    let (icon, color) = match status {
-        ToolStatus::Running => (tool_icon(name), YELLOW),
-        ToolStatus::Success => (tool_icon(name), GREEN),
-        ToolStatus::Error => ("\u{2717}", RED),
-    };
-    let elapsed_str = elapsed
-        .map(|d| format!(" ({:.1}s)", d.as_secs_f64()))
-        .unwrap_or_default();
-    let preview = if args_preview.len() > 40 {
-        format!("{}...", &args_preview[..37])
-    } else {
-        args_preview.to_string()
-    };
-    println!(
-        "  {DIM}  \u{250a} {color}{icon} {name} {DIM}`{preview}`{elapsed_str}{RESET}"
-    );
-}
-
-// ─── Conversation Blocks ─────────────────────────────────────────────────────
-
-/// Default box width for conversation blocks.
-const BOX_WIDTH: usize = 60;
-
-/// Print a user message in a box:
-pub fn print_user_block(text: &str) {
-    let width = BOX_WIDTH;
-    let title = "You";
-    let top_pad = width.saturating_sub(title.len() + 4);
-    println!(
-        "\n  {CORAL}{BOLD}\u{250c}\u{2500} {title} {}\u{2510}{RESET}",
-        "\u{2500}".repeat(top_pad)
-    );
-    for line in text.lines() {
-        let vis_len = visible_len(line);
-        let pad = width.saturating_sub(vis_len).saturating_sub(1);
-        println!(
-            "  {CORAL}\u{2502}{RESET} {}{}{CORAL}\u{2502}{RESET}",
-            line,
-            " ".repeat(pad)
-        );
-    }
-    println!(
-        "  {CORAL}{BOLD}\u{2514}{}\u{2518}{RESET}",
-        "\u{2500}".repeat(width)
-    );
-}
-
-/// Print an agent response in a box with markdown rendering inside.
-pub fn print_agent_block(text: &str) {
-    let width = BOX_WIDTH;
-    let title = "ZERO";
-    let top_pad = width.saturating_sub(title.len() + 4);
-    println!(
-        "\n  {CYAN}{BOLD}\u{250c}\u{2500} {title} {}\u{2510}{RESET}",
-        "\u{2500}".repeat(top_pad)
-    );
-    for line in text.lines() {
-        let rendered = render_inline(line);
-        let vis = visible_len(&rendered);
-        let pad = width.saturating_sub(vis).saturating_sub(1);
-        println!(
-            "  {CYAN}\u{2502}{RESET} {}{}{CYAN}\u{2502}{RESET}",
-            rendered,
-            " ".repeat(pad)
-        );
-    }
-    println!(
-        "  {CYAN}{BOLD}\u{2514}{}\u{2518}{RESET}",
-        "\u{2500}".repeat(width)
-    );
-}
-
-/// Print a dim system message in a box.
-pub fn print_system_block(text: &str) {
-    let width = BOX_WIDTH;
-    let title = "SYS";
-    let top_pad = width.saturating_sub(title.len() + 4);
-    println!(
-        "\n  {DIM}\u{250c}\u{2500} {title} {}\u{2510}{RESET}",
-        "\u{2500}".repeat(top_pad)
-    );
-    for line in text.lines() {
-        let vis = visible_len(line);
-        let pad = width.saturating_sub(vis).saturating_sub(1);
-        println!(
-            "  {DIM}\u{2502}{RESET} {DIM}{}{}{DIM}\u{2502}{RESET}",
-            line,
-            " ".repeat(pad)
-        );
-    }
-    println!(
-        "  {DIM}\u{2514}{}\u{2518}{RESET}",
-        "\u{2500}".repeat(width)
-    );
-}
-
-/// Print the user prompt indicator.
-pub fn print_prompt(_app: &App) {
-    print!("  {CORAL}{BOLD}> {RESET}");
-    io::stdout().flush().unwrap();
-}
-
-// ─── Session Summary ─────────────────────────────────────────────────────────
-
-/// Print a compact session summary after each exchange:
-///  model-name │ N msgs │ X.Xs
-pub fn print_session_summary(app: &App) {
-    let msg_count = app.messages.len();
-    let elapsed = app.start_time.elapsed().as_secs_f64();
-    let elapsed_str = if elapsed >= 60.0 {
-        format!("{}m {:.0}s", (elapsed / 60.0) as u64, elapsed % 60.0)
-    } else {
-        format!("{:.1}s", elapsed)
-    };
-    println!(
-        "\n  {DIM} {BRIGHT_CYAN}{}{RESET}{DIM} \u{2502} {} msgs \u{2502} {}{RESET}",
-        app.model, msg_count, elapsed_str
-    );
-}
-
-// ─── Exit Summary (Hermes-style) ─────────────────────────────────────────────
-
-/// Print the exit summary when the session ends.
-pub fn print_exit_summary(app: &App) {
-    let duration = app.start_time.elapsed();
-    let total_secs = duration.as_secs();
-    let minutes = total_secs / 60;
-    let seconds = total_secs % 60;
-    let duration_str = format!("{}m {}s", minutes, seconds);
-
-    let total_msgs = app.messages.len();
-    let user_msgs = app.messages.iter().filter(|m| m.role == MessageRole::User).count();
-    let tool_calls: usize = app.messages.iter().map(|m| m.tool_calls.len()).sum();
-
-    println!();
-    println!("  {DIM}Session: {}{RESET}", app.session_name);
-    println!("  {DIM}Duration: {}{RESET}", duration_str);
-    println!(
-        "  {DIM}Messages: {} ({} user, {} tool calls){RESET}",
-        total_msgs, user_msgs, tool_calls
-    );
-    println!();
-}
-
-// ─── Markdown Rendering ──────────────────────────────────────────────────────
-
-/// Calculate the visible length of a string (ignoring ANSI escape sequences).
-fn visible_len(s: &str) -> usize {
+/// Calculate visible length of string (strips ANSI escape codes)
+pub fn visible_len(s: &str) -> usize {
     let mut len = 0;
     let mut in_escape = false;
     for ch in s.chars() {
-        if ch == '\x1b' {
-            in_escape = true;
-            continue;
-        }
-        if in_escape {
-            if ch == 'm' {
-                in_escape = false;
-            }
-            continue;
-        }
+        if ch == '\x1b' { in_escape = true; continue; }
+        if in_escape { if ch == 'm' { in_escape = false; } continue; }
         len += 1;
     }
     len
 }
 
-/// Render markdown text with ANSI formatting
-#[allow(unused_assignments)]
-pub fn render_markdown(text: &str, indent: usize) {
-    let indent_str = " ".repeat(indent);
-    let mut in_code_block = false;
-    let mut code_lang = String::new();
+// ─── Header Bar ──────────────────────────────────────────────────────────────
+/// Prints the persistent header bar at the top of the session.
+/// Format: Zero-Agent  provider: X  model: Y (reasoning)  session: Z  context: N%
+pub fn print_header(app: &App) {
+    let (width, _) = get_terminal_size();
+    let ctx = if app.context_pct > 0 {
+        format!("  context: {}%", app.context_pct)
+    } else {
+        String::new()
+    };
+    let line = format!(
+        " Zero-Agent  provider: {}  model: {}  session: {}{}",
+        app.provider,
+        app.model_display(),
+        app.session_name,
+        ctx
+    );
+    println!("{BOLD}{BRIGHT_CYAN}{}{RESET}", line);
+    println!("{DIM}{}{RESET}", "\u{2500}".repeat(width));
+}
 
-    for line in text.lines() {
-        // Code block toggle
-        if line.starts_with("```") {
-            if in_code_block {
-                in_code_block = false;
-                println!();
-            } else {
-                in_code_block = true;
-                code_lang = line[3..].trim().to_string();
-                if !code_lang.is_empty() {
-                    println!("{indent_str}{DIM}  | {code_lang}{RESET}");
-                }
-            }
-            continue;
-        }
-
-        if in_code_block {
-            println!("{indent_str}{DIM}  | {line}{RESET}");
-            continue;
-        }
-
-        // Headings
-        if line.starts_with("### ") {
-            println!("{indent_str}{CORAL}{BOLD}{}{RESET}", &line[4..]);
-            continue;
-        }
-        if line.starts_with("## ") {
-            println!("{indent_str}{WHITE}{BOLD}{}{RESET}", &line[3..]);
-            continue;
-        }
-        if line.starts_with("# ") {
-            println!("{indent_str}{WHITE}{BOLD}{}{RESET}", &line[2..]);
-            continue;
-        }
-
-        // Horizontal rule
-        if line.trim() == "---" || line.trim() == "***" {
-            println!("{indent_str}{DIM}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}{RESET}");
-            continue;
-        }
-
-        // Blockquote
-        if line.starts_with("> ") {
-            println!("{indent_str}{DIM}  | {}{RESET}", &line[2..]);
-            continue;
-        }
-
-        // Unordered list
-        if line.starts_with("- ") || line.starts_with("* ") {
-            let content = &line[2..];
-            if line.starts_with("  ") {
-                println!("{indent_str}{DIM}    o {}{RESET}", render_inline(content));
-            } else {
-                println!("{indent_str}{DIM}  * {}{RESET}", render_inline(content));
-            }
-            continue;
-        }
-
-        // Ordered list
-        if line.len() > 2 && line.chars().next().map_or(false, |c| c.is_ascii_digit()) {
-            if let Some(pos) = line.find(". ") {
-                let num = &line[..pos];
-                let content = &line[pos + 2..];
-                println!("{indent_str}{DIM}  {num}. {}{RESET}", render_inline(content));
-                continue;
-            }
-        }
-
-        // Regular text
-        println!("{indent_str}{}", render_inline(line));
+// ─── Shimmering Status Line ───────────────────────────────────────────────────
+/// Format elapsed time as "0ms", "1.2s", "2m 4s"
+pub fn format_elapsed(elapsed: Duration) -> String {
+    let ms = elapsed.as_millis();
+    if ms < 1000 {
+        format!("{}ms", ms)
+    } else if elapsed.as_secs() < 60 {
+        format!("{:.1}s", elapsed.as_secs_f64())
+    } else {
+        let m = elapsed.as_secs() / 60;
+        let s = elapsed.as_secs() % 60;
+        format!("{}m {}s", m, s)
     }
 }
 
-/// Render inline markdown formatting
-fn render_inline(text: &str) -> String {
+/// Start the shimmering status line in a background thread.
+/// The status line sits fixed above the prompt box.
+/// Returns (JoinHandle, stop_flag, tool_name_arc).
+pub fn start_shimmer_status(
+    initial_mode: StatusMode,
+) -> (thread::JoinHandle<()>, Arc<AtomicBool>, Arc<std::sync::Mutex<StatusMode>>) {
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_clone = Arc::clone(&stop);
+    let mode_arc = Arc::new(std::sync::Mutex::new(initial_mode));
+    let mode_clone = Arc::clone(&mode_arc);
+
+    let handle = thread::spawn(move || {
+        let start = Instant::now();
+        let mut frame_idx: usize = 0;
+        while !stop_clone.load(Ordering::Relaxed) {
+            let elapsed = start.elapsed();
+            let elapsed_str = format_elapsed(elapsed);
+            let color = SHIMMER_FRAMES[frame_idx % SHIMMER_FRAMES.len()];
+
+            let mode = mode_clone.lock().unwrap().clone();
+            let label = match &mode {
+                StatusMode::Flowing => "Flowing...".to_string(),
+                StatusMode::Executing(tool) => format!("Executing: {}...", tool),
+                StatusMode::Interrupted => "Interrupted".to_string(),
+                StatusMode::Idle => String::new(),
+            };
+
+            if !label.is_empty() {
+                print!("\r  {}{}{RESET}  {DIM}⎋ to interrupt  {}{RESET}   ",
+                    color, label, elapsed_str);
+                io::stdout().flush().unwrap();
+            }
+
+            frame_idx = frame_idx.wrapping_add(1);
+            thread::sleep(Duration::from_millis(SHIMMER_INTERVAL_MS));
+        }
+    });
+
+    (handle, stop, mode_arc)
+}
+
+/// Stop the shimmer and clear the status line.
+pub fn stop_shimmer(
+    handle: thread::JoinHandle<()>,
+    stop: Arc<AtomicBool>,
+) {
+    stop.store(true, Ordering::Relaxed);
+    let _ = handle.join();
+    print!("\r");
+    clear_line();
+    io::stdout().flush().unwrap();
+}
+
+/// Print a static (non-animated) stopped/interrupted status.
+pub fn print_status_stopped() {
+    println!("\r  {DIM}Stopped{RESET}");
+}
+
+// ─── Scroll Blocks ────────────────────────────────────────────────────────────
+
+/// Print a user message block.
+/// ┌─ You ────────────────────────────────────────────────────┐
+/// │ message text                                             │
+/// └──────────────────────────────────────────────────────────┘
+pub fn print_user_block(text: &str, width: usize) {
+    let inner = width.saturating_sub(4);
+    let title = "You";
+    let dashes = inner.saturating_sub(title.len() + 2);
+    println!("\n  {CORAL}{BOLD}\u{250c}\u{2500} {title} {}{RESET}",
+        "\u{2500}".repeat(dashes));
+    for line in text.lines() {
+        let vlen = visible_len(line);
+        let pad = inner.saturating_sub(vlen);
+        println!("  {CORAL}\u{2502}{RESET} {}{} {CORAL}\u{2502}{RESET}", line, " ".repeat(pad));
+    }
+    println!("  {CORAL}{BOLD}\u{2514}{}{RESET}", "\u{2500}".repeat(inner + 2));
+}
+
+/// Print a streaming agent text block — no box, just labeled lines.
+/// ZERO  text flows here with inline markdown rendering
+pub fn print_agent_text(text: &str) {
+    println!();
+    // Print the label on a fresh line
+    print!("  {CYAN}{BOLD}ZERO{RESET}  ");
+    let mut first = true;
+    for line in text.lines() {
+        if first {
+            println!("{}", render_inline(line));
+            first = false;
+        } else {
+            println!("        {}", render_inline(line));
+        }
+    }
+    if first {
+        println!(); // empty text, just newline
+    }
+}
+
+/// Print a thinking block (dimmed, accent title, truncated).
+pub fn print_thinking_block(content: &str, log_path: &str) {
+    let lines: Vec<&str> = content.lines().collect();
+    let truncated = lines.len() > THINKING_MAX_LINES;
+    let display_lines = if truncated { &lines[..THINKING_MAX_LINES] } else { &lines[..] };
+
+    println!();
+    println!("  {THINKING_TITLE}{BOLD}Thinking:{RESET}");
+    for line in display_lines {
+        println!("  {THINKING_TEXT}  {}{RESET}", line);
+    }
+    if truncated && !log_path.is_empty() {
+        println!("  {THINKING_TEXT}  ... [{} lines truncated]{RESET}", lines.len() - THINKING_MAX_LINES);
+        println!("  {DIM}  See full trace → {UNDERLINE}{}{RESET}", log_path);
+    }
+}
+
+/// Print a tool call line.
+/// ┆ 📄 read_file  `src/main.0`  (0.4s)
+pub fn print_tool_call(name: &str, args_preview: &str, status: &ToolStatus, elapsed: Option<Duration>) {
+    let icon = tool_icon(name);
+    let (color, marker) = match status {
+        ToolStatus::Running  => (YELLOW, "\u{25cf}"), // ●
+        ToolStatus::Success  => (GREEN,  "\u{25cf}"),
+        ToolStatus::Error    => (RED,    "\u{25cf}"),
+    };
+    let elapsed_str = elapsed
+        .map(|d| format!("  ({})", format_elapsed(d)))
+        .unwrap_or_default();
+    let preview = if args_preview.len() > 50 {
+        format!("{}...", &args_preview[..47])
+    } else {
+        args_preview.to_string()
+    };
+    println!("  {DIM}\u{250a}{RESET}  {color}{marker} {BOLD}{name}{RESET}  {DIM}`{preview}`{elapsed_str}{RESET}");
+}
+
+/// Print a tool result (dimmed, truncated if large).
+pub fn print_tool_result(name: &str, output: &str, log_path: &str) {
+    let lines: Vec<&str> = output.lines().collect();
+    let truncated = lines.len() > TOOL_RESULT_MAX_LINES;
+    let display = if truncated { &lines[..TOOL_RESULT_MAX_LINES] } else { &lines[..] };
+
+    for line in display {
+        println!("  {DIM}  \u{2502} {}{RESET}", line);
+    }
+    if truncated && !log_path.is_empty() {
+        println!("  {DIM}  \u{2502} ... [{} lines] → {UNDERLINE}{}{RESET}", lines.len(), log_path);
+    }
+}
+
+/// Print a memory footer line at end of turn.
+/// ↳ Memory: prefer concise responses | project.md
+pub fn print_memory_footer(description: &str, file_name: &str) {
+    let desc = if description.len() > 60 {
+        format!("{}...", &description[..57])
+    } else {
+        description.to_string()
+    };
+    println!("  {DIM}\u{21b3} Memory: {} | {}{RESET}", desc, file_name);
+}
+
+/// Print a system note (dim, no border).
+pub fn print_system_note(text: &str) {
+    println!("  {DIM}{ITALIC}{}{RESET}", text);
+}
+
+// ─── Approval Modal ───────────────────────────────────────────────────────────
+/// Print the full-focus approval modal overlay.
+/// Clears line area and renders a centered card.
+pub fn print_approval_modal(modal: &ApprovalModal) {
+    let (width, _) = get_terminal_size();
+    let w = width.min(62);
+    let pad = (width.saturating_sub(w)) / 2;
+    let sp = " ".repeat(pad);
+
+    let risk_color = match modal.risk_level.as_str() {
+        "Safe"        => GREEN,
+        "Mutating"    => YELLOW,
+        "Destructive" => RED,
+        _             => RED,
+    };
+
+    println!();
+    println!("{sp}{YELLOW}{BOLD}\u{250c}{}{BOLD}\u{2510}{RESET}", "\u{2500}".repeat(w - 2));
+    println!("{sp}{YELLOW}\u{2502}{RESET}{BOLD}{RED}  \u{26a0}  Action Required{RESET}{}  {YELLOW}\u{2502}{RESET}", " ".repeat(w - 20));
+    println!("{sp}{YELLOW}\u{2502}{RESET}  Tool: {BOLD}{}{RESET}{}  {YELLOW}\u{2502}{RESET}",
+        modal.tool_name, " ".repeat(w.saturating_sub(modal.tool_name.len() + 11)));
+    if !modal.command.is_empty() {
+        let cmd_preview = if modal.command.len() > w - 10 {
+            format!("{}...", &modal.command[..w.saturating_sub(13)])
+        } else {
+            modal.command.clone()
+        };
+        println!("{sp}{YELLOW}\u{2502}{RESET}  Command: {CYAN}{}{RESET}{}  {YELLOW}\u{2502}{RESET}",
+            cmd_preview, " ".repeat(w.saturating_sub(cmd_preview.len() + 13)));
+    }
+    println!("{sp}{YELLOW}\u{2502}{RESET}  Risk:  {risk_color}{BOLD}{}{RESET}{}  {YELLOW}\u{2502}{RESET}",
+        modal.risk_level, " ".repeat(w.saturating_sub(modal.risk_level.len() + 12)));
+    println!("{sp}{YELLOW}\u{2502}{RESET}{}  {YELLOW}\u{2502}{RESET}", " ".repeat(w - 4));
+
+    // Options
+    let options = ["Deny", "Approve Once", "Approve for Session", "Approve Always"];
+    let keys    = ["D", "O", "S", "A"];
+    for (i, (opt, key)) in options.iter().zip(keys.iter()).enumerate() {
+        let indicator = if i == modal.selected { format!("{GREEN}{BOLD}\u{25b6} [{key}] {opt}{RESET}") }
+                        else { format!("{DIM}  [{key}] {opt}{RESET}") };
+        let vis = 5 + opt.len(); // approximate visible len
+        println!("{sp}{YELLOW}\u{2502}{RESET}  {}{}  {YELLOW}\u{2502}{RESET}",
+            indicator, " ".repeat(w.saturating_sub(vis + 8)));
+    }
+    println!("{sp}{YELLOW}\u{2502}{RESET}{}  {YELLOW}\u{2502}{RESET}", " ".repeat(w - 4));
+    println!("{sp}{YELLOW}{BOLD}\u{2514}{}{BOLD}\u{2518}{RESET}", "\u{2500}".repeat(w - 2));
+    println!("{sp}{DIM}  ↑↓ navigate  Enter to confirm  Esc = Deny{RESET}");
+    println!();
+}
+
+// ─── Slash Palette ────────────────────────────────────────────────────────────
+/// Print the slash command palette (above input line).
+pub fn print_slash_palette(filter: &str) {
+    let commands = filter_slash_commands(filter);
+    if commands.is_empty() {
+        println!("  {DIM}No matching commands{RESET}");
+        return;
+    }
+    println!("  {DIM}{}\u{2500}{RESET}", "\u{2500}".repeat(68));
+    for cmd in &commands {
+        println!("  {CORAL}/{RESET}{BOLD}{}{RESET}  {DIM}{}{RESET}",
+            cmd.name,
+            cmd.description);
+    }
+    println!("  {DIM}{}{RESET}", "\u{2500}".repeat(69));
+}
+
+// ─── Model Picker ─────────────────────────────────────────────────────────────
+/// Print the interactive model picker list.
+pub fn print_model_picker(models: &[String], selected: usize, provider: &str) {
+    println!();
+    println!("  {BOLD}{WHITE}Select model  ({DIM}provider: {CYAN}{}{RESET}{BOLD}{WHITE}){RESET}", provider);
+    println!("  {DIM}{}{RESET}", "\u{2500}".repeat(50));
+    for (i, model) in models.iter().enumerate() {
+        if i == selected {
+            println!("  {CORAL}{BOLD}\u{25b6} {}{RESET}", model);
+        } else {
+            println!("  {DIM}  {}{RESET}", model);
+        }
+    }
+    // Bottom "change provider" option
+    let change_idx = models.len();
+    if change_idx == selected {
+        println!("  {CYAN}{BOLD}\u{25b6} \u{2192} Change provider{RESET}");
+    } else {
+        println!("  {DIM}  \u{2192} Change provider{RESET}");
+    }
+    println!("  {DIM}{}{RESET}", "\u{2500}".repeat(50));
+    println!("  {DIM}↑↓ navigate  Enter to select  Esc to cancel{RESET}");
+    println!();
+}
+
+// ─── Input Prompt ─────────────────────────────────────────────────────────────
+/// Print the prompt indicator (for display before readline loop).
+pub fn print_prompt(app: &App) {
+    print!("  {CORAL}{BOLD}> {RESET}");
+    io::stdout().flush().unwrap();
+}
+
+/// Format a pasted multi-line block as a bracket annotation.
+pub fn format_paste_bracket(line_count: usize) -> String {
+    format!("[Pasted: {} lines]", line_count)
+}
+
+// ─── Help ────────────────────────────────────────────────────────────────────
+pub fn print_help() {
+    let commands = all_slash_commands();
+    println!();
+    println!("  {BOLD}{WHITE}Commands:{RESET}");
+    for cmd in &commands {
+        println!("  {CORAL}/{:<12}{RESET}  {DIM}{}{RESET}", cmd.name, cmd.description);
+    }
+    println!();
+    println!("  {DIM}Keyboard:{RESET}");
+    println!("  {DIM}  Esc        Interrupt turn / clear prompt / close menu{RESET}");
+    println!("  {DIM}  Ctrl+C     Interrupt current turn{RESET}");
+    println!("  {DIM}  ↑↓         Input history{RESET}");
+    println!();
+}
+
+// ─── Status Info ─────────────────────────────────────────────────────────────
+pub fn print_status_info(app: &App) {
+    println!();
+    println!("  {BOLD}{WHITE}Status:{RESET}");
+    println!("  {DIM}Model:     {CYAN}{}{RESET}", app.model_display());
+    println!("  {DIM}Provider:  {}{RESET}", app.provider);
+    println!("  {DIM}Session:   {}{RESET}", app.session_name);
+    println!("  {DIM}Style:     {}{RESET}", app.response_style.name());
+    println!("  {DIM}Context:   {}%{RESET}", app.context_pct);
+    println!("  {DIM}Messages:  {}{RESET}", app.messages.len());
+    println!();
+}
+
+// ─── Exit Summary ─────────────────────────────────────────────────────────────
+pub fn print_exit_summary(app: &App) {
+    let dur = app.start_time.elapsed();
+    let m = dur.as_secs() / 60;
+    let s = dur.as_secs() % 60;
+    let user_msgs = app.messages.iter().filter(|m| m.role == MessageRole::User).count();
+    let tool_calls: usize = app.messages.iter().map(|m| m.tool_calls.len()).sum();
+
+    println!();
+    println!("  {DIM}Session:   {}{RESET}", app.session_name);
+    println!("  {DIM}Duration:  {}m {}s{RESET}", m, s);
+    println!("  {DIM}Turns:     {}  Tool calls: {}{RESET}", user_msgs, tool_calls);
+    if app.context_pct > 0 {
+        println!("  {DIM}Context:   {}%{RESET}", app.context_pct);
+    }
+    println!();
+}
+
+// ─── Profile ─────────────────────────────────────────────────────────────────
+pub fn print_profile(profile: &UserProfile) {
+    println!();
+    println!("  {BOLD}{WHITE}Profile:{RESET}");
+    if !profile.name.is_empty()  { println!("  {DIM}Name:  {}{RESET}", profile.name); }
+    if !profile.role.is_empty()  { println!("  {DIM}Role:  {}{RESET}", profile.role); }
+    if !profile.about.is_empty() { println!("  {DIM}About: {}{RESET}", profile.about); }
+    println!("  {DIM}Style: {}{RESET}", profile.style.name());
+    println!();
+}
+
+// ─── Markdown Inline Renderer ─────────────────────────────────────────────────
+pub fn render_inline(text: &str) -> String {
     let mut result = String::new();
     let mut chars = text.chars().peekable();
-
     while let Some(ch) = chars.next() {
-        if ch == '*' {
-            // Bold or italic
-            if chars.peek() == Some(&'*') {
-                chars.next(); // consume second *
-                // Bold
-                let mut bold_text = String::new();
+        match ch {
+            '*' if chars.peek() == Some(&'*') => {
+                chars.next();
+                let mut inner = String::new();
                 loop {
                     match chars.next() {
-                        Some('*') if chars.peek() == Some(&'*') => {
-                            chars.next();
-                            break;
-                        }
-                        Some(c) => bold_text.push(c),
+                        Some('*') if chars.peek() == Some(&'*') => { chars.next(); break; }
+                        Some(c) => inner.push(c),
                         None => break,
                     }
                 }
-                result.push_str(&format!("{BOLD}{bold_text}{RESET}"));
-            } else {
-                // Italic
-                let mut italic_text = String::new();
+                result.push_str(&format!("{BOLD}{inner}{RESET}"));
+            }
+            '*' => {
+                let mut inner = String::new();
                 loop {
                     match chars.next() {
                         Some('*') => break,
-                        Some(c) => italic_text.push(c),
+                        Some(c) => inner.push(c),
                         None => break,
                     }
                 }
-                result.push_str(&format!("{ITALIC}{italic_text}{RESET}"));
+                result.push_str(&format!("{ITALIC}{inner}{RESET}"));
             }
-        } else if ch == '`' {
-            // Inline code
-            let mut code_text = String::new();
-            loop {
-                match chars.next() {
-                    Some('`') => break,
-                    Some(c) => code_text.push(c),
-                    None => break,
-                }
-            }
-            result.push_str(&format!("{YELLOW}{code_text}{RESET}"));
-        } else if ch == '~' && chars.peek() == Some(&'~') {
-            chars.next(); // consume second ~
-            // Strikethrough
-            let mut strike_text = String::new();
-            loop {
-                match chars.next() {
-                    Some('~') if chars.peek() == Some(&'~') => {
-                        chars.next();
-                        break;
-                    }
-                    Some(c) => strike_text.push(c),
-                    None => break,
-                }
-            }
-            result.push_str(&format!("{STRIKETHROUGH}{strike_text}{RESET}"));
-        } else if ch == '[' {
-            // Link [text](url)
-            let mut link_text = String::new();
-            loop {
-                match chars.next() {
-                    Some(']') => break,
-                    Some(c) => link_text.push(c),
-                    None => break,
-                }
-            }
-            if chars.peek() == Some(&'(') {
-                chars.next(); // consume (
-                let mut url = String::new();
+            '`' => {
+                let mut inner = String::new();
                 loop {
                     match chars.next() {
-                        Some(')') => break,
-                        Some(c) => url.push(c),
+                        Some('`') => break,
+                        Some(c) => inner.push(c),
                         None => break,
                     }
                 }
-                result.push_str(&format!("{UNDERLINE}{link_text}{RESET}{DIM} ({url}){RESET}"));
-            } else {
-                result.push('[');
-                result.push_str(&link_text);
+                result.push_str(&format!("{YELLOW}{inner}{RESET}"));
             }
-        } else {
-            result.push(ch);
+            _ => result.push(ch),
         }
     }
-
     result
 }
 
-// ─── Input Handling ──────────────────────────────────────────────────────────
+// ─── Tool Icon ────────────────────────────────────────────────────────────────
+fn tool_icon(name: &str) -> &'static str {
+    match name {
+        "read_file"  | "fs.read"   => "\u{1f4c4}",
+        "write_file" | "fs.write"  => "\u{270f}\u{fe0f}",
+        "edit_file"  | "fs.edit"   => "\u{270f}\u{fe0f}",
+        "shell"      | "shell.run" => "\u{1f4bb}",
+        "glob"       | "fs.glob"   => "\u{1f50d}",
+        "memory"     | "memory.*"  => "\u{1f9e0}",
+        _                          => "\u{2699}\u{fe0f}",
+    }
+}
 
-/// Read a line of input from the user
+// ─── Input Handling (basic) ───────────────────────────────────────────────────
 pub fn read_input() -> io::Result<String> {
     let mut input = String::new();
     io::stdin().read_line(&mut input)?;
     Ok(input.trim().to_string())
-}
-
-/// Read a password (masked input)
-pub fn read_password() -> io::Result<String> {
-    read_input()
-}
-
-// ─── Help & Info ─────────────────────────────────────────────────────────────
-
-/// Print the help menu
-pub fn print_help() {
-    println!();
-    println!("  {BOLD}{WHITE}Commands:{RESET}");
-    println!("  {CORAL}/help{RESET}              Show this help");
-    println!("  {CORAL}/style{RESET} <name>     Switch response style (concise/verbose/technical/non-technical/<persona>)");
-    println!("  {CORAL}/session{RESET} list     List sessions");
-    println!("  {CORAL}/session{RESET} new      New session");
-    println!("  {CORAL}/session{RESET} resume   Resume session");
-    println!("  {CORAL}/session{RESET} delete   Delete session");
-    println!("  {CORAL}/clear{RESET}            Clear conversation");
-    println!("  {CORAL}/status{RESET}           Show agent status");
-    println!("  {CORAL}/config{RESET}           Show/edit config");
-    println!("  {CORAL}/profile{RESET}          Show/edit profile");
-    println!("  {CORAL}/quit{RESET}             Exit");
-    println!();
-}
-
-/// Print the status info
-pub fn print_status_info(app: &App) {
-    println!();
-    println!("  {BOLD}{WHITE}Status:{RESET}");
-    println!("  {DIM}Model:    {CYAN}{}{RESET}", app.model);
-    println!("  {DIM}Provider: {}{RESET}", app.provider);
-    println!("  {DIM}Session:  {}{RESET}", app.session_name);
-    println!("  {DIM}Style:    {}{RESET}", app.response_style.name());
-    println!("  {DIM}Messages: {}{RESET}", app.messages.len());
-    println!();
-}
-
-/// Print the profile
-pub fn print_profile(profile: &UserProfile) {
-    println!();
-    println!("  {BOLD}{WHITE}Profile:{RESET}");
-    if !profile.name.is_empty() {
-        println!("  {DIM}Name:    {}{RESET}", profile.name);
-    }
-    if !profile.role.is_empty() {
-        println!("  {DIM}Role:    {}{RESET}", profile.role);
-    }
-    if !profile.about.is_empty() {
-        println!("  {DIM}About:   {}{RESET}", profile.about);
-    }
-    if !profile.persona.is_empty() {
-        println!("  {DIM}Persona: {}{RESET}", profile.persona);
-    }
-    println!("  {DIM}Style:   {}{RESET}", profile.style.name());
-    println!();
-}
-
-/// Print the approval modal
-pub fn print_approval(approval: &ApprovalRequest) {
-    let risk_color = match approval.risk_level.as_str() {
-        "Safe" => GREEN,
-        "Mutating" => YELLOW,
-        "Destructive" => RED,
-        "Blocked" => RED,
-        _ => WHITE,
-    };
-
-    println!();
-    println!("  {YELLOW}{BOLD}\u{256d}\u{2500} Tool Approval Required {}\u{256e}{RESET}", "\u{2500}".repeat(35));
-    println!("  {YELLOW}\u{2502}{RESET}                                                   {YELLOW}\u{2502}{RESET}");
-    println!("  {YELLOW}\u{2502}{RESET}  Tool: {BOLD}{}{RESET}", approval.tool_name);
-    println!("  {YELLOW}\u{2502}{RESET}  Risk: {risk_color}{}{RESET}", approval.risk_level);
-    println!("  {YELLOW}\u{2502}{RESET}                                                   {YELLOW}\u{2502}{RESET}");
-    println!("  {YELLOW}\u{2502}{RESET}  {}", approval.description);
-    println!("  {YELLOW}\u{2502}{RESET}                                                   {YELLOW}\u{2502}{RESET}");
-    println!("  {YELLOW}\u{2502}{RESET}  Input:");
-    for line in approval.input_preview.lines().take(10) {
-        println!("  {YELLOW}\u{2502}{RESET}  {CYAN}{line}{RESET}");
-    }
-    println!("  {YELLOW}\u{2502}{RESET}                                                   {YELLOW}\u{2502}{RESET}");
-    println!("  {YELLOW}\u{2502}{RESET}  {BOLD}[y]{RESET}es  {BOLD}[n]{RESET}o  {BOLD}[a]{RESET}lways  {BOLD}[v]{RESET}iew details  {DIM}[Esc]{RESET} cancel");
-    println!("  {YELLOW}\u{2570}{}\u{256f}{RESET}", "\u{2500}".repeat(51));
-    println!();
 }

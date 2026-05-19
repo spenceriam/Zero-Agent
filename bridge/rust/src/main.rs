@@ -42,7 +42,8 @@ async fn interactive_mode() {
         app.model = agent.model().to_string();
         app.provider = agent.provider_id().to_string();
         app.session_name = "main".to_string();
-        tui::print_status_bar(&app);
+        app.session_id = agent.session_id().to_string();
+        tui::print_header(&app);
     }
 
     #[cfg(not(feature = "tui"))]
@@ -58,7 +59,9 @@ async fn interactive_mode() {
     loop {
         #[cfg(feature = "tui")]
         {
-            let app = tui::App::new();
+            let mut app = tui::App::new();
+            app.model = agent.model().to_string();
+            app.provider = agent.provider_id().to_string();
             tui::print_prompt(&app);
         }
 
@@ -83,6 +86,23 @@ async fn interactive_mode() {
             continue;
         }
 
+        // Slash command palette hint
+        #[cfg(feature = "tui")]
+        if input.starts_with('/') && input.len() > 1 {
+            let filter = &input[1..];
+            // Check for exact command match first
+            let exact = tui::all_slash_commands().into_iter().find(|c| c.name == filter.split_whitespace().next().unwrap_or(""));
+            if exact.is_none() {
+                // Show palette and continue to next prompt
+                tui::print_slash_palette(filter);
+                continue;
+            }
+        } else if input == "/" {
+            #[cfg(feature = "tui")]
+            tui::print_slash_palette("");
+            continue;
+        }
+
         match input {
             "/quit" | "/exit" | "/q" => break,
             "/help" => {
@@ -91,9 +111,8 @@ async fn interactive_mode() {
                 #[cfg(not(feature = "tui"))]
                 {
                     println!("Commands:");
-                    println!("  /quit, /exit, /q  - Exit");
-                    println!("  /help             - Show this help");
-                    println!("  /provider         - Show current provider info");
+                    println!("  /quit /exit /q  Exit");
+                    println!("  /help           Show this help");
                 }
                 continue;
             }
@@ -107,6 +126,7 @@ async fn interactive_mode() {
                     let mut app = tui::App::new();
                     app.model = agent.model().to_string();
                     app.provider = agent.provider_id().to_string();
+                    app.session_id = agent.session_id().to_string();
                     tui::print_status_info(&app);
                 }
                 #[cfg(not(feature = "tui"))]
@@ -122,6 +142,9 @@ async fn interactive_mode() {
                 continue;
             }
             _ if input.starts_with('/') => {
+                #[cfg(feature = "tui")]
+                tui::print_system_note(&format!("Unknown command: {}", input));
+                #[cfg(not(feature = "tui"))]
                 println!("Unknown command: {}", input);
                 continue;
             }
@@ -139,6 +162,7 @@ async fn interactive_mode() {
         app.model = agent.model().to_string();
         app.provider = agent.provider_id().to_string();
         app.session_name = "main".to_string();
+        app.session_id = agent.session_id().to_string();
         app.start_time = std::time::Instant::now() - std::time::Duration::from_secs_f64(agent.elapsed_secs());
         tui::print_exit_summary(&app);
     }

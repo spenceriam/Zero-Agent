@@ -1,6 +1,6 @@
 use crate::config::Config;
 use crate::provider::{Message, Provider, StreamEventType};
-use crate::tools::{self, ToolRegistry};
+use crate::tools::ToolRegistry;
 
 #[cfg(feature = "tui")]
 use crate::tui;
@@ -15,6 +15,7 @@ pub struct Agent {
     provider: Provider,
     messages: Vec<Message>,
     session_path: Option<String>,
+    session_id: String,
     message_count: usize,
     start_time: std::time::Instant,
 }
@@ -31,11 +32,8 @@ impl Agent {
         let session_dir = format!("{}/sessions", config.data_dir);
         let _ = std::fs::create_dir_all(&session_dir);
 
-        let session_path = format!(
-            "{}/{}.jsonl",
-            session_dir,
-            chrono::Utc::now().format("%Y%m%d-%H%M%S")
-        );
+        let session_id = chrono::Utc::now().format("%Y%m%d-%H%M%S").to_string();
+        let session_path = format!("{}/{}.jsonl", session_dir, session_id);
 
         let messages = vec![Message {
             role: "system".to_string(),
@@ -48,6 +46,7 @@ impl Agent {
             provider,
             messages,
             session_path: Some(session_path),
+            session_id,
             message_count: 0,
             start_time: std::time::Instant::now(),
         }
@@ -65,8 +64,8 @@ impl Agent {
         self.provider.id()
     }
 
-    pub fn message_count(&self) -> usize {
-        self.message_count
+    pub fn session_id(&self) -> &str {
+        &self.session_id
     }
 
     pub fn elapsed_secs(&self) -> f64 {
@@ -74,9 +73,11 @@ impl Agent {
     }
 
     pub async fn chat(&mut self, user_input: &str) -> Result<(), String> {
+        let term_width = tui_width();
+
         // Show user block
         #[cfg(feature = "tui")]
-        tui::print_user_block(user_input);
+        tui::print_user_block(user_input, term_width);
 
         // Add user message
         self.messages.push(Message {
@@ -90,28 +91,28 @@ impl Agent {
         let tool_registry = ToolRegistry::default();
         let tools = tool_registry.definitions();
 
-        #[cfg(feature = "tui")]
-        let mut app = tui::App::new();
-        #[cfg(feature = "tui")]
-        {
-            app.model = self.model().to_string();
-            app.provider = self.provider_id().to_string();
-        }
+        // Build log path for this session
+        let log_dir = format!("{}/.zero-agent/sessions/{}", home_dir(), self.session_id);
+        let _ = std::fs::create_dir_all(&log_dir);
+        let thinking_log = format!("{}/thinking.log", log_dir);
+        let tool_log = format!("{}/tool-output.log", log_dir);
 
         loop {
-            // Start spinner
+            // Start shimmer status line
             #[cfg(feature = "tui")]
-            let (spinner_handle, spinner_stop) = tui::start_spinner();
+            let (shimmer_handle, shimmer_stop, shimmer_mode) =
+                tui::start_shimmer_status(tui::StatusMode::Flowing);
 
             let events = self.provider.stream_chat(&self.messages, &tools).await;
 
-            // Stop spinner
+            // Stop shimmer
             #[cfg(feature = "tui")]
-            tui::stop_spinner(spinner_handle, spinner_stop);
+            tui::stop_shimmer(shimmer_handle, shimmer_stop);
 
             let events = events?;
 
             let mut assistant_text = String::new();
+            let mut thinking_text = String::new();
             let mut tool_calls: Vec<(String, String, String)> = Vec::new();
 
             for event in &events {
@@ -136,16 +137,33 @@ impl Agent {
                 });
                 self.message_count += 1;
 
-                // Show agent block
+                // Show thinking block if any
                 #[cfg(feature = "tui")]
-                {
-                    app.add_message(tui::MessageRole::Assistant, assistant_text.clone());
-                    tui::render_layout(&app);
+                if !thinking_text.is_empty() {
+                    let line_count = thinking_text.lines().count();
+                    let display = if line_count > 100 {
+                        // Write full to log
+                        let _ = std::fs::write(&thinking_log, &thinking_text);
+                        thinking_text.lines().take(100).collect::<Vec<_>>().join("\n")
+                    } else {
+                        thinking_text.clone()
+                    };
+                    let log_ref = if line_count > 100 { thinking_log.as_str() } else { "" };
+                    tui::print_thinking_block(&display, log_ref);
                 }
+
+                // Show agent text
+                #[cfg(feature = "tui")]
+                tui::print_agent_text(&assistant_text);
 
                 break;
             } else {
-                // Response with tool calls
+                // Response with tool calls — may have partial text first
+                #[cfg(feature = "tui")]
+                if !assistant_text.is_empty() {
+                    tui::print_agent_text(&assistant_text);
+                }
+
                 let tc_objects: Vec<crate::provider::ToolCall> = tool_calls
                     .iter()
                     .map(|(id, name, args)| crate::provider::ToolCall {
@@ -160,22 +178,24 @@ impl Agent {
 
                 self.messages.push(Message {
                     role: "assistant".to_string(),
-                    content: if assistant_text.is_empty() {
-                        None
-                    } else {
-                        Some(assistant_text)
-                    },
+                    content: if assistant_text.is_empty() { None } else { Some(assistant_text) },
                     tool_calls: Some(tc_objects),
                     tool_call_id: None,
                 });
 
                 // Execute each tool
                 for (id, name, args_str) in &tool_calls {
+                    // Show tool call line — Running
                     #[cfg(feature = "tui")]
                     {
-                        app.add_tool_call(name.clone(), args_str.clone());
-                        tui::render_layout(&app);
+                        let preview = args_preview(args_str, 50);
+                        tui::print_tool_call(name, &preview, &tui::ToolStatus::Running, None);
                     }
+
+                    // Update shimmer mode to Executing
+                    #[cfg(feature = "tui")]
+                    let (exec_shimmer_handle, exec_shimmer_stop, _exec_mode) =
+                        tui::start_shimmer_status(tui::StatusMode::Executing(name.clone()));
 
                     let tool_start = std::time::Instant::now();
                     let args: serde_json::Value =
@@ -183,11 +203,25 @@ impl Agent {
                     let result = tool_registry.execute(name, &args);
                     let tool_elapsed = tool_start.elapsed();
 
-                    // Show tool call line (completed)
+                    // Stop exec shimmer
+                    #[cfg(feature = "tui")]
+                    tui::stop_shimmer(exec_shimmer_handle, exec_shimmer_stop);
+
+                    // Write tool result to log and show truncated
                     #[cfg(feature = "tui")]
                     {
-                        app.update_tool_status(name, tui::ToolStatus::Success, Some(result.clone()));
-                        tui::render_layout(&app);
+                        let line_count = result.lines().count();
+                        let log_ref = if line_count > 50 {
+                            append_to_log(&tool_log, &format!("=== {} ===\n{}\n", name, result));
+                            tool_log.as_str()
+                        } else {
+                            ""
+                        };
+
+                        // Show completed tool call line
+                        let preview = args_preview(args_str, 50);
+                        tui::print_tool_call(name, &preview, &tui::ToolStatus::Success, Some(tool_elapsed));
+                        tui::print_tool_result(name, &result, log_ref);
                     }
 
                     self.messages.push(Message {
@@ -198,8 +232,6 @@ impl Agent {
                     });
                     self.message_count += 1;
                 }
-
-                // Continue loop for more tool calls or final text
             }
         }
 
@@ -223,4 +255,33 @@ impl Agent {
             let _ = std::fs::write(path, json);
         }
     }
+}
+
+fn args_preview(args_str: &str, max_len: usize) -> String {
+    if args_str.len() > max_len {
+        format!("{}...", &args_str[..max_len.saturating_sub(3)])
+    } else {
+        args_str.to_string()
+    }
+}
+
+fn append_to_log(path: &str, content: &str) {
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = f.write_all(content.as_bytes());
+    }
+}
+
+fn home_dir() -> String {
+    std::env::var("HOME").unwrap_or_else(|_| ".".to_string())
+}
+
+#[cfg(feature = "tui")]
+fn tui_width() -> usize {
+    tui::get_terminal_size().0
+}
+
+#[cfg(not(feature = "tui"))]
+fn tui_width() -> usize {
+    80
 }
