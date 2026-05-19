@@ -90,6 +90,14 @@ impl Agent {
         let tool_registry = ToolRegistry::default();
         let tools = tool_registry.definitions();
 
+        #[cfg(feature = "tui")]
+        let mut app = tui::App::new();
+        #[cfg(feature = "tui")]
+        {
+            app.model = self.model().to_string();
+            app.provider = self.provider_id().to_string();
+        }
+
         loop {
             // Start spinner
             #[cfg(feature = "tui")]
@@ -130,7 +138,10 @@ impl Agent {
 
                 // Show agent block
                 #[cfg(feature = "tui")]
-                tui::print_agent_block(&assistant_text);
+                {
+                    app.add_message(tui::MessageRole::Assistant, assistant_text.clone());
+                    tui::render_layout(&app);
+                }
 
                 break;
             } else {
@@ -160,15 +171,10 @@ impl Agent {
 
                 // Execute each tool
                 for (id, name, args_str) in &tool_calls {
-                    // Show tool call line (running)
                     #[cfg(feature = "tui")]
                     {
-                        let args_preview = if args_str.len() > 40 {
-                            format!("{}...", &args_str[..40])
-                        } else {
-                            args_str.clone()
-                        };
-                        tui::print_tool_line(name, &args_preview, &tui::ToolStatus::Running, None);
+                        app.add_tool_call(name.clone(), args_str.clone());
+                        tui::render_layout(&app);
                     }
 
                     let tool_start = std::time::Instant::now();
@@ -180,17 +186,8 @@ impl Agent {
                     // Show tool call line (completed)
                     #[cfg(feature = "tui")]
                     {
-                        let args_preview = if args_str.len() > 40 {
-                            format!("{}...", &args_str[..40])
-                        } else {
-                            args_str.clone()
-                        };
-                        tui::print_tool_line(
-                            name,
-                            &args_preview,
-                            &tui::ToolStatus::Success,
-                            Some(tool_elapsed),
-                        );
+                        app.update_tool_status(name, tui::ToolStatus::Success, Some(result.clone()));
+                        tui::render_layout(&app);
                     }
 
                     self.messages.push(Message {
@@ -204,17 +201,6 @@ impl Agent {
 
                 // Continue loop for more tool calls or final text
             }
-        }
-
-        // Show session summary
-        #[cfg(feature = "tui")]
-        {
-            let mut app = tui::App::new();
-            app.model = self.model().to_string();
-            app.provider = self.provider_id().to_string();
-            app.session_name = "main".to_string();
-            app.start_time = self.start_time;
-            tui::print_session_summary(&app);
         }
 
         // Persist session

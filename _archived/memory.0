@@ -1,0 +1,43 @@
+pub enum MemoryKind {
+    User,
+    Session,
+    Fact,
+}
+
+pub shape MemoryItem {
+    id: String,
+    kind: MemoryKind,
+    text: String,
+    session_id: String,
+}
+
+pub fun userMemory(id: String, text: String) -> MemoryItem {
+    return MemoryItem {
+        id: id,
+        kind: MemoryKind.User,
+        text: text,
+        session_id: "",
+    }
+}
+
+pub fun sessionMemory(id: String, text: String, session_id: String) -> MemoryItem {
+    return MemoryItem {
+        id: id,
+        kind: MemoryKind.Session,
+        text: text,
+        session_id: session_id,
+    }
+}
+
+pub fun factMemory(id: String, text: String) -> MemoryItem {
+    return MemoryItem {
+        id: id,
+        kind: MemoryKind.Fact,
+        text: text,
+        session_id: "",
+    }
+}
+
+pub fun memoryPath(data_dir: String) -> String {
+    return ""
+}

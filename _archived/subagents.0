@@ -1,0 +1,54 @@
+pub enum SubAgentStatus {
+    Queued,
+    Running,
+    Completed,
+    Failed,
+}
+
+pub shape SubAgentRun {
+    id: String,
+    task: String,
+    status: SubAgentStatus,
+    result: String,
+    parent_session: String,
+}
+
+pub fun queuedSubAgent(id: String, task: String, parent_session: String) -> SubAgentRun {
+    return SubAgentRun {
+        id: id,
+        task: task,
+        status: SubAgentStatus.Queued,
+        result: "",
+        parent_session: parent_session,
+    }
+}
+
+pub fun runningSubAgent(id: String, task: String, parent_session: String) -> SubAgentRun {
+    return SubAgentRun {
+        id: id,
+        task: task,
+        status: SubAgentStatus.Running,
+        result: "",
+        parent_session: parent_session,
+    }
+}
+
+pub fun completedSubAgent(id: String, task: String, result: String, parent_session: String) -> SubAgentRun {
+    return SubAgentRun {
+        id: id,
+        task: task,
+        status: SubAgentStatus.Completed,
+        result: result,
+        parent_session: parent_session,
+    }
+}
+
+pub fun failedSubAgent(id: String, task: String, error: String, parent_session: String) -> SubAgentRun {
+    return SubAgentRun {
+        id: id,
+        task: task,
+        status: SubAgentStatus.Failed,
+        result: error,
+        parent_session: parent_session,
+    }
+}

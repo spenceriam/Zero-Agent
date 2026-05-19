@@ -1,0 +1,8 @@
+pub enum AppMode {
+    Tui,
+    Telegram,
+}
+
+pub fun defaultMode() -> AppMode {
+    return AppMode.Tui
+}

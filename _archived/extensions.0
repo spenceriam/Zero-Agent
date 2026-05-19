@@ -1,0 +1,44 @@
+use core.types
+
+pub shape ExtensionManifest {
+    name: String,
+    kind: String,
+    description: String,
+    risk: RiskLevel,
+    version: String,
+    author: String,
+}
+
+pub shape ExtensionRegistry {
+    extensions: String,
+}
+
+pub fun localToolExtension(name: String, description: String) -> ExtensionManifest {
+    return ExtensionManifest {
+        name: name,
+        kind: "tool",
+        description: description,
+        risk: RiskLevel.Mutating,
+        version: "0.1.0",
+        author: "local",
+    }
+}
+
+pub fun localSkillExtension(name: String, description: String) -> ExtensionManifest {
+    return ExtensionManifest {
+        name: name,
+        kind: "skill",
+        description: description,
+        risk: RiskLevel.Safe,
+        version: "0.1.0",
+        author: "local",
+    }
+}
+
+pub fun extensionPath(data_dir: String, name: String) -> String {
+    return ""
+}
+
+pub fun extensionsDir(data_dir: String) -> String {
+    return ""
+}

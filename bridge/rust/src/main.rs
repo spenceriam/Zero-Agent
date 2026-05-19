@@ -86,14 +86,43 @@ async fn interactive_mode() {
         match input {
             "/quit" | "/exit" | "/q" => break,
             "/help" => {
-                println!("Commands:");
-                println!("  /quit, /exit, /q  - Exit");
-                println!("  /help             - Show this help");
-                println!("  /provider         - Show current provider info");
+                #[cfg(feature = "tui")]
+                tui::print_help();
+                #[cfg(not(feature = "tui"))]
+                {
+                    println!("Commands:");
+                    println!("  /quit, /exit, /q  - Exit");
+                    println!("  /help             - Show this help");
+                    println!("  /provider         - Show current provider info");
+                }
                 continue;
             }
             "/provider" => {
                 println!("Provider: {}", agent.provider_info());
+                continue;
+            }
+            "/status" => {
+                #[cfg(feature = "tui")]
+                {
+                    let mut app = tui::App::new();
+                    app.model = agent.model().to_string();
+                    app.provider = agent.provider_id().to_string();
+                    tui::print_status_info(&app);
+                }
+                #[cfg(not(feature = "tui"))]
+                println!("Status: {}", agent.provider_info());
+                continue;
+            }
+            "/profile" => {
+                #[cfg(feature = "tui")]
+                {
+                    let app = tui::App::new();
+                    tui::print_profile(&app.profile);
+                }
+                continue;
+            }
+            _ if input.starts_with('/') => {
+                println!("Unknown command: {}", input);
                 continue;
             }
             _ => {}

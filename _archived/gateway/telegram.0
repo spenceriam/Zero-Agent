@@ -1,0 +1,67 @@
+use core.events
+use core.types
+
+pub shape TelegramCommand {
+    name: String,
+    description: String,
+}
+
+pub shape TelegramMessage {
+    chat_id: String,
+    text: String,
+    from: String,
+}
+
+pub shape TelegramUpdate {
+    update_id: String,
+    message: TelegramMessage,
+}
+
+pub shape TelegramConfig {
+    bot_token: String,
+    allowed_users: String,
+}
+
+pub fun defaultConfig() -> TelegramConfig {
+    return TelegramConfig {
+        bot_token: "",
+        allowed_users: "",
+    }
+}
+
+pub fun startCommand() -> TelegramCommand {
+    return TelegramCommand {
+        name: "/start",
+        description: "Start or resume the owner session",
+    }
+}
+
+pub fun helpCommand() -> TelegramCommand {
+    return TelegramCommand {
+        name: "/help",
+        description: "Show available commands",
+    }
+}
+
+pub fun statusCommand() -> TelegramCommand {
+    return TelegramCommand {
+        name: "/status",
+        description: "Show agent status",
+    }
+}
+
+pub fun formatEvent(event: AgentEvent) -> String {
+    return event.text
+}
+
+pub fun formatAssistantReply(text: String) -> String {
+    return text
+}
+
+pub fun formatToolApproval(tool_name: String, description: String) -> String {
+    return ""
+}
+
+pub fun isAllowedUser(config: TelegramConfig, user_id: String) -> Bool {
+    return config.allowed_users == "" || config.allowed_users.contains(user_id)
+}

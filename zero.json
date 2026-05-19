@@ -26,10 +26,15 @@
     }
   },
   "capabilities": {
-    "filesystem": true,
-    "env": true,
-    "process": "bridge-required-until-validated",
-    "network": "bridge-required-until-validated",
-    "terminal": "bridge-required-until-validated"
+    "filesystem": ["read", "write"],
+    "env": ["read"],
+    "process": ["spawn", "exec"],
+    "network": ["https"],
+    "terminal": ["raw", "ansi"]
+  },
+  "diagnostics": {
+    "format": "json",
+    "explain": true,
+    "fix": true
   }
 }

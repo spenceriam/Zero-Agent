@@ -175,6 +175,8 @@ pub struct App {
     pub profile: UserProfile,
     pub input_history: Vec<String>,
     pub history_index: Option<usize>,
+    pub tokens_used: usize,
+    pub current_job: Option<String>,
 }
 
 impl App {
@@ -191,6 +193,8 @@ impl App {
             profile: UserProfile::new(),
             input_history: Vec::new(),
             history_index: None,
+            tokens_used: 0,
+            current_job: None,
         }
     }
 
@@ -265,7 +269,46 @@ pub fn clear_to_end() {
 
 /// Get terminal size (columns, rows)
 pub fn get_terminal_size() -> (usize, usize) {
-    (80, 24)
+    // In a real TUI we'd use termion or similar
+    (100, 30)
+}
+
+/// Render the full Hermes-style split-pane layout
+pub fn render_layout(app: &App) {
+    clear_screen();
+    let (width, _height) = get_terminal_size();
+    
+    // Header
+    print_status_bar(app);
+    println!("{}", "\u{2500}".repeat(width));
+    
+    // Split Panes: Conversation (left) | Activity (right)
+    let left_width = (width as f64 * 0.7) as usize;
+    let right_width = width - left_width - 1;
+    
+    // For a scrolling ANSI TUI, we might just print things in order,
+    // but the layout concept suggests we want to show both.
+    // Since we are in a terminal, we'll focus on a "Status-rich scroll"
+    // rather than a full fixed-position TUI for now, as that's more robust
+    // without heavy dependencies.
+    
+    for msg in &app.messages {
+        match msg.role {
+            MessageRole::User => print_user_block(&msg.content),
+            MessageRole::Assistant => {
+                print_agent_block(&msg.content);
+                for tc in &msg.tool_calls {
+                    print_tool_line(&tc.name, &tc.input, &tc.status, tc.elapsed);
+                }
+            }
+            MessageRole::System => print_system_block(&msg.content),
+            MessageRole::Tool => {} // Handled inside assistant block usually
+        }
+    }
+    
+    if let Some(job) = &app.current_job {
+        println!("\n  {DIM}Job: {}{RESET}", job);
+    }
 }
 
 // ─── Braille Spinner ─────────────────────────────────────────────────────────
@@ -358,15 +401,12 @@ pub fn print_tool_line(name: &str, args_preview: &str, status: &ToolStatus, elap
 const BOX_WIDTH: usize = 60;
 
 /// Print a user message in a box:
-///   +-- You ----...----+
-///   | message text     |
-///   +------...---------+
 pub fn print_user_block(text: &str) {
     let width = BOX_WIDTH;
     let title = "You";
     let top_pad = width.saturating_sub(title.len() + 4);
     println!(
-        "\n  {CORAL}{BOLD}\u{256d}\u{2500} {title} {}\u{256e}{RESET}",
+        "\n  {CORAL}{BOLD}\u{250c}\u{2500} {title} {}\u{2510}{RESET}",
         "\u{2500}".repeat(top_pad)
     );
     for line in text.lines() {
@@ -379,7 +419,7 @@ pub fn print_user_block(text: &str) {
         );
     }
     println!(
-        "  {CORAL}{BOLD}\u{2570}{}\u{256f}{RESET}",
+        "  {CORAL}{BOLD}\u{2514}{}\u{2518}{RESET}",
         "\u{2500}".repeat(width)
     );
 }
@@ -390,7 +430,7 @@ pub fn print_agent_block(text: &str) {
     let title = "ZERO";
     let top_pad = width.saturating_sub(title.len() + 4);
     println!(
-        "\n  {CYAN}{BOLD}\u{256d}\u{2500} {title} {}\u{256e}{RESET}",
+        "\n  {CYAN}{BOLD}\u{250c}\u{2500} {title} {}\u{2510}{RESET}",
         "\u{2500}".repeat(top_pad)
     );
     for line in text.lines() {
@@ -404,7 +444,7 @@ pub fn print_agent_block(text: &str) {
         );
     }
     println!(
-        "  {CYAN}{BOLD}\u{2570}{}\u{256f}{RESET}",
+        "  {CYAN}{BOLD}\u{2514}{}\u{2518}{RESET}",
         "\u{2500}".repeat(width)
     );
 }
@@ -415,7 +455,7 @@ pub fn print_system_block(text: &str) {
     let title = "SYS";
     let top_pad = width.saturating_sub(title.len() + 4);
     println!(
-        "\n  {DIM}\u{256d}\u{2500} {title} {}\u{256e}{RESET}",
+        "\n  {DIM}\u{250c}\u{2500} {title} {}\u{2510}{RESET}",
         "\u{2500}".repeat(top_pad)
     );
     for line in text.lines() {
@@ -428,7 +468,7 @@ pub fn print_system_block(text: &str) {
         );
     }
     println!(
-        "  {DIM}\u{2570}{}\u{256f}{RESET}",
+        "  {DIM}\u{2514}{}\u{2518}{RESET}",
         "\u{2500}".repeat(width)
     );
 }
