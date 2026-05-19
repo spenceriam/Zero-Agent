@@ -1,6 +1,6 @@
 use crate::config::Config;
 use crate::provider::{Message, Provider, StreamEventType};
-use crate::tools::ToolRegistry;
+use crate::tools::{RiskLevel, ToolRegistry};
 
 #[cfg(feature = "tui")]
 use crate::tui;
@@ -18,6 +18,8 @@ pub struct Agent {
     session_id: String,
     message_count: usize,
     start_time: std::time::Instant,
+    /// Tools approved for this session ("always" = global, "session" = this run)
+    session_approved_tools: Vec<String>,
 }
 
 impl Agent {
@@ -49,6 +51,7 @@ impl Agent {
             session_id,
             message_count: 0,
             start_time: std::time::Instant::now(),
+            session_approved_tools: Vec::new(),
         }
     }
 
@@ -185,6 +188,75 @@ impl Agent {
 
                 // Execute each tool
                 for (id, name, args_str) in &tool_calls {
+                    // Check tool risk level and request approval if needed
+                    let risk = tool_registry
+                        .get(name)
+                        .map(|t| t.risk_level())
+                        .unwrap_or(RiskLevel::Safe);
+
+                    let needs_approval = matches!(risk, RiskLevel::Mutating | RiskLevel::Destructive)
+                        && !self.session_approved_tools.contains(name);
+
+                    if needs_approval {
+                        #[cfg(feature = "tui")]
+                        {
+                            let modal = tui::ApprovalModal {
+                                tool_name: name.clone(),
+                                command: args_str.clone(),
+                                risk_level: format!("{:?}", risk),
+                                selected: 0,
+                            };
+                            tui::print_approval_modal(&modal);
+                            // Read user approval choice
+                            print!("  Choice [D/O/S/A]: ");
+                            let _ = std::io::Write::flush(&mut std::io::stdout());
+                            let mut choice = String::new();
+                            let _ = std::io::stdin().read_line(&mut choice);
+                            match choice.trim().to_uppercase().as_str() {
+                                "D" | "" => {
+                                    // Deny — push a tool result indicating denial
+                                    tui::print_system_note(&format!("Denied: {}", name));
+                                    self.messages.push(Message {
+                                        role: "tool".to_string(),
+                                        content: Some(format!("[Tool '{}' was denied by user]", name)),
+                                        tool_calls: None,
+                                        tool_call_id: Some(id.clone()),
+                                    });
+                                    continue;
+                                }
+                                "S" => {
+                                    // Approve for session
+                                    self.session_approved_tools.push(name.clone());
+                                    tui::print_system_note(&format!("Approved for session: {}", name));
+                                }
+                                "A" => {
+                                    // Approve always — TODO: persist to global config
+                                    self.session_approved_tools.push(name.clone());
+                                    tui::print_system_note(&format!("Approved always: {} (persisted next release)", name));
+                                }
+                                _ => {
+                                    // "O" or anything else = Approve Once
+                                    tui::print_system_note(&format!("Approved once: {}", name));
+                                }
+                            }
+                        }
+                        #[cfg(not(feature = "tui"))]
+                        {
+                            println!("Approval required for tool '{}'. Allow? [y/N]", name);
+                            let mut ans = String::new();
+                            let _ = std::io::stdin().read_line(&mut ans);
+                            if !ans.trim().eq_ignore_ascii_case("y") {
+                                self.messages.push(Message {
+                                    role: "tool".to_string(),
+                                    content: Some(format!("[Tool '{}' was denied by user]", name)),
+                                    tool_calls: None,
+                                    tool_call_id: Some(id.clone()),
+                                });
+                                continue;
+                            }
+                        }
+                    }
+
                     // Show tool call line — Running
                     #[cfg(feature = "tui")]
                     {
