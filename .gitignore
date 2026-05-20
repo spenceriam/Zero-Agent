@@ -25,3 +25,7 @@ Thumbs.db
 # OpenClaude local settings
 .openclaude/settings.local.json
 .claude/
+
+# Local scratch / agent test artifacts
+temp_test/
+.cursor/

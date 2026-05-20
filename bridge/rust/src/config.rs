@@ -38,7 +38,7 @@ impl ProviderConfig {
             return v;
         }
         match self.id.as_str() {
-            "opengateway" | "ollama-local" => false,
+            "ollama-local" => false,
             _ => !self.base_url.contains("localhost") && !self.base_url.contains("127.0.0.1"),
         }
     }
@@ -72,8 +72,18 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             data_dir: ".zero-agent".to_string(),
-            default_provider: "ollama-cloud".to_string(),
+            default_provider: "openrouter".to_string(),
             providers: vec![
+                ProviderConfig {
+                    id: "openrouter".to_string(),
+                    name: "OpenRouter".to_string(),
+                    api_format: ApiFormat::OpenAI,
+                    base_url: "https://openrouter.ai/api/v1".to_string(),
+                    api_key: String::new(),
+                    default_model: "anthropic/claude-sonnet-4".to_string(),
+                    models: vec![],
+                    requires_api_key: None,
+                },
                 ProviderConfig {
                     id: "ollama-cloud".to_string(),
                     name: "Ollama Cloud".to_string(),
@@ -82,16 +92,6 @@ impl Default for Config {
                     api_key: String::new(),
                     default_model: "deepseek-v4-pro".to_string(),
                     models: vec!["deepseek-v4-pro".to_string()],
-                    requires_api_key: None,
-                },
-                ProviderConfig {
-                    id: "openrouter".to_string(),
-                    name: "OpenRouter".to_string(),
-                    api_format: ApiFormat::OpenAI,
-                    base_url: "https://openrouter.ai/api/v1".to_string(),
-                    api_key: String::new(),
-                    default_model: String::new(),
-                    models: vec![],
                     requires_api_key: None,
                 },
                 ProviderConfig {
@@ -361,16 +361,16 @@ mod tests {
     use std::fs;
 
     #[test]
-    fn opengateway_does_not_require_api_key() {
+    fn explicit_requires_api_key_false() {
         let p = ProviderConfig {
-            id: "opengateway".into(),
-            name: "OpenGateway".into(),
+            id: "custom".into(),
+            name: "Custom".into(),
             api_format: ApiFormat::OpenAI,
-            base_url: "https://opengateway.gitlawb.com/v1".into(),
+            base_url: "https://example.com/v1".into(),
             api_key: String::new(),
-            default_model: "mimo-v2.5-pro".into(),
+            default_model: String::new(),
             models: vec![],
-            requires_api_key: None,
+            requires_api_key: Some(false),
         };
         assert!(!p.requires_api_key());
     }
@@ -383,7 +383,7 @@ mod tests {
         fs::create_dir_all(tmp.join(".zero-agent")).unwrap();
         fs::write(
             tmp.join(".zero-agent/config.json"),
-            r#"{"data_dir":".zero-agent","default_provider":"opengateway","providers":[],"tool_policy":{"allow_safe_without_prompt":true,"ask_before_mutating":true,"ask_before_destructive":true}}"#,
+            r#"{"data_dir":".zero-agent","default_provider":"openrouter","providers":[],"tool_policy":{"allow_safe_without_prompt":true,"ask_before_mutating":true,"ask_before_destructive":true}}"#,
         )
         .unwrap();
 
