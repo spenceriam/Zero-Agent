@@ -3,7 +3,7 @@ pub mod shell;
 
 use serde_json::Value;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RiskLevel {
     Safe,
     Mutating,
@@ -17,6 +17,20 @@ pub trait Tool: Send + Sync {
     fn risk_level(&self) -> RiskLevel;
     fn input_schema(&self) -> Value;
     fn execute(&self, args: &Value) -> String;
+}
+
+/// Resolve tool risk for a specific invocation (shell uses command classification).
+pub fn effective_risk(tool_name: &str, args: &Value, registry: &ToolRegistry) -> RiskLevel {
+    if tool_name == "shell" {
+        if let Some(cmd) = args.get("command").and_then(|v| v.as_str()) {
+            return shell::classify_shell_command(cmd);
+        }
+        return RiskLevel::Mutating;
+    }
+    registry
+        .get(tool_name)
+        .map(|t| t.risk_level())
+        .unwrap_or(RiskLevel::Safe)
 }
 
 pub struct ToolRegistry {
@@ -59,6 +73,24 @@ impl ToolRegistry {
             Some(tool) => tool.execute(args),
             None => format!("Unknown tool: {name}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn approval_only_for_destructive_risk() {
+        let registry = ToolRegistry::default();
+        let safe = effective_risk("shell", &json!({"command": "ls -la"}), &registry);
+        assert_eq!(safe, RiskLevel::Safe);
+        let destructive =
+            effective_risk("shell", &json!({"command": "git push"}), &registry);
+        assert_eq!(destructive, RiskLevel::Destructive);
+        let write = effective_risk("write_file", &json!({"path": "x", "contents": "y"}), &registry);
+        assert_eq!(write, RiskLevel::Mutating);
     }
 }
 

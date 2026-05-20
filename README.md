@@ -14,6 +14,35 @@ It is designed for coding, co-working, productivity, chat, local tools, backgrou
 - Keep memory local-first and user-mutable.
 - Allow users to ask the agent to find, install, build, or create tools/skills/extensions when needed.
 
+## Running the TUI
+
+From the repository root (recommended — config is discovered by walking up to `.zero-agent/config.json`):
+
+```bash
+./scripts/run.sh
+```
+
+`./scripts/run.sh` runs the **pre-built binary** when possible, so you won't see compiler output on every launch. For development rebuilds:
+
+```bash
+cargo build --release --manifest-path bridge/rust/Cargo.toml --features tui
+./scripts/run.sh
+```
+
+If you use `cargo run` directly, yellow `warning:` lines are **Rust compiler warnings**, not errors — the build succeeded if you see `Finished release profile`.
+
+Pass an explicit config path:
+
+```bash
+./scripts/run.sh --config /path/to/config.json
+```
+
+Set `ZERO_HOME` to use a global config directory under `$HOME/.zero-agent/`.
+
+### Layout
+
+The TUI uses a **fixed footer** (status bar + prompt) and a **scroll region** above it for the conversation transcript — the same structural model as Hermes default CLI.
+
 ## Current stage
 
 This repository starts as a spec-driven project. Implementation should proceed in BMAD-style chunks that are small enough for an AI coding agent to complete safely.

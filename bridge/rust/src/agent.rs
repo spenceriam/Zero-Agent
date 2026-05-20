@@ -1,9 +1,17 @@
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
 use crate::config::Config;
+use crate::debug;
+use crate::memory::{self, MemoryScope};
 use crate::provider::{Message, Provider, StreamEventType};
-use crate::tools::{RiskLevel, ToolRegistry};
+use crate::tools::ToolRegistry;
 
 #[cfg(feature = "tui")]
 use crate::tui;
+#[cfg(feature = "tui")]
+use crate::tui::input::run_approval_modal;
 
 const SYSTEM_PROMPT: &str = r#"You are ZERO, a personal AI assistant for developers.
 You are running locally on the user's machine.
@@ -11,47 +19,80 @@ You have access to tools for reading/writing files, running shell commands, and 
 Be concise and direct. When you need to do something, use your tools.
 Always use tools to interact with the filesystem or run commands - never just describe what to do."#;
 
+const MAX_EMPTY_CONTINUATION_RETRIES: u32 = 2;
+const CONTINUATION_NUDGE: &str =
+    "Continue executing the remaining tool tests from the original request. Use tools for each step.";
+
+/// True when the provider returned no text, reasoning, or tool calls.
+pub(crate) fn is_empty_provider_response(
+    assistant_text: &str,
+    thinking_text: &str,
+    tool_calls_len: usize,
+) -> bool {
+    tool_calls_len == 0 && assistant_text.is_empty() && thinking_text.is_empty()
+}
+
+/// Post-tool round that came back empty — candidate for retry/nudge.
+pub(crate) fn should_retry_post_tool_continuation(
+    tools_ran_this_turn: bool,
+    assistant_text: &str,
+    thinking_text: &str,
+    tool_calls_len: usize,
+) -> bool {
+    tools_ran_this_turn
+        && is_empty_provider_response(assistant_text, thinking_text, tool_calls_len)
+}
+
 pub struct Agent {
+    config: Config,
     provider: Provider,
     messages: Vec<Message>,
     session_path: Option<String>,
     session_id: String,
     message_count: usize,
     start_time: std::time::Instant,
-    /// Tools approved for this session ("always" = global, "session" = this run)
     session_approved_tools: Vec<String>,
+    global_approved_tools: Vec<String>,
+    interrupt: Arc<AtomicBool>,
+    turn_memory_footer: Option<(String, String)>,
 }
 
 impl Agent {
-    pub fn new(config: &Config, provider_id: Option<&str>) -> Self {
+    pub fn new(config: Config, provider_id: Option<&str>) -> Self {
         let provider_config = provider_id
             .and_then(|id| config.get_provider(id))
             .unwrap_or_else(|| config.default_provider())
             .clone();
 
         let provider = Provider::new(provider_config);
+        let global_approved_tools = config.tool_policy.globally_approved_tools.clone();
 
-        let session_dir = format!("{}/sessions", config.data_dir);
+        let session_dir = config.sessions_dir();
         let _ = std::fs::create_dir_all(&session_dir);
 
         let session_id = chrono::Utc::now().format("%Y%m%d-%H%M%S").to_string();
-        let session_path = format!("{}/{}.jsonl", session_dir, session_id);
+        let session_path = session_dir.join(format!("{session_id}.jsonl"));
 
         let messages = vec![Message {
             role: "system".to_string(),
             content: Some(SYSTEM_PROMPT.to_string()),
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         }];
 
         Self {
+            config,
             provider,
             messages,
-            session_path: Some(session_path),
+            session_path: Some(session_path.to_string_lossy().into_owned()),
             session_id,
             message_count: 0,
             start_time: std::time::Instant::now(),
             session_approved_tools: Vec::new(),
+            global_approved_tools,
+            interrupt: Arc::new(AtomicBool::new(false)),
+            turn_memory_footer: None,
         }
     }
 
@@ -75,54 +116,190 @@ impl Agent {
         self.start_time.elapsed().as_secs_f64()
     }
 
-    pub async fn chat(&mut self, user_input: &str) -> Result<(), String> {
-        let term_width = tui_width();
+    pub fn set_model(&mut self, model: &str) -> Result<(), String> {
+        self.provider.set_model(model.to_string());
+        self.config.set_default_model(model)
+    }
 
-        // Show user block
+    pub fn set_provider(&mut self, provider_id: &str) -> Result<(), String> {
+        let provider_config = self
+            .config
+            .get_provider(provider_id)
+            .ok_or_else(|| format!("unknown provider: {provider_id}"))?
+            .clone();
+        self.provider = Provider::new(provider_config);
+        self.config.set_default_provider(provider_id)
+    }
+
+    pub async fn discover_models(&self) -> Vec<String> {
+        self.provider.discover_models().await
+    }
+
+    pub fn interrupt_handle(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.interrupt)
+    }
+
+    pub fn request_interrupt(&self) {
+        self.interrupt.store(true, Ordering::Relaxed);
+    }
+
+    #[cfg(feature = "tui")]
+    pub fn apply_profile(&mut self, profile: &tui::UserProfile) {
+        let section = crate::profile::profile_system_prompt_section(profile);
+        if section.is_empty() {
+            return;
+        }
+        let prompt = format!("{SYSTEM_PROMPT}\n\n{section}");
+        if let Some(msg) = self.messages.first_mut() {
+            if msg.role == "system" {
+                msg.content = Some(prompt);
+                return;
+            }
+        }
+        self.messages.insert(
+            0,
+            Message {
+                role: "system".to_string(),
+                content: Some(prompt),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+            },
+        );
+    }
+
+    pub async fn chat(&mut self, user_input: &str) -> Result<(), String> {
+        self.interrupt.store(false, Ordering::Relaxed);
+        self.turn_memory_footer = None;
+
+        let term_width = tui_width();
+        let log_dir = session_log_dir(&self.config, &self.session_id);
+        let _ = std::fs::create_dir_all(&log_dir);
+        debug::set_log_path(log_dir.join("debug.log"));
+        let thinking_log = log_dir.join("thinking.log");
+        let tool_log = log_dir.join("tool-output.log");
+        let chat_log = log_dir.join("chat.log");
+
+        debug::log("agent", &format!("chat() start len={}", user_input.len()));
+
+        append_to_log(
+            chat_log.to_str().unwrap_or("chat.log"),
+            &format!("USER: {user_input}\n"),
+        );
+
         #[cfg(feature = "tui")]
         tui::print_user_block(user_input, term_width);
 
-        // Add user message
         self.messages.push(Message {
             role: "user".to_string(),
             content: Some(user_input.to_string()),
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         });
         self.message_count += 1;
 
         let tool_registry = ToolRegistry::default();
         let tools = tool_registry.definitions();
 
-        // Build log path for this session
-        let log_dir = format!("{}/.zero-agent/sessions/{}", home_dir(), self.session_id);
-        let _ = std::fs::create_dir_all(&log_dir);
-        let thinking_log = format!("{}/thinking.log", log_dir);
-        let tool_log = format!("{}/tool-output.log", log_dir);
+        let mut loop_iter = 0u32;
+        let mut tools_ran_this_turn = false;
+        let mut empty_continuation_retries = 0u32;
+        let mut continuation_nudge_injected = false;
 
         loop {
-            // Start shimmer status line
+            loop_iter += 1;
+            debug::log("agent", &format!("inner loop iteration={loop_iter}"));
+
+            if self.interrupt.load(Ordering::Relaxed) {
+                debug::log("agent", "interrupted before provider call");
+                #[cfg(feature = "tui")]
+                tui::print_status_stopped();
+                break;
+            }
+
             #[cfg(feature = "tui")]
-            let (shimmer_handle, shimmer_stop, shimmer_mode) =
-                tui::start_shimmer_status(tui::StatusMode::Flowing);
+            tui::layout::set_status_mode(tui::StatusMode::Flowing);
 
-            let events = self.provider.stream_chat(&self.messages, &tools).await;
-
-            // Stop shimmer
             #[cfg(feature = "tui")]
-            tui::stop_shimmer(shimmer_handle, shimmer_stop);
+            let mut stream_writer = tui::AgentStreamWriter::new();
 
-            let events = events?;
+            debug::log("provider", "stream_chat start");
+            let events = {
+                #[cfg(feature = "tui")]
+                {
+                    self.provider
+                        .stream_chat_with(
+                            &self.messages,
+                            &tools,
+                            Some(&self.interrupt),
+                            Some(|event| stream_writer.on_event(&event)),
+                        )
+                        .await
+                }
+                #[cfg(not(feature = "tui"))]
+                {
+                    self.provider
+                        .stream_chat(&self.messages, &tools, Some(&self.interrupt))
+                        .await
+                }
+            };
+
+            #[cfg(feature = "tui")]
+            {
+                stream_writer.finish();
+            }
+
+            if self.interrupt.load(Ordering::Relaxed) {
+                debug::log("agent", "interrupted after provider stream");
+                #[cfg(feature = "tui")]
+                tui::print_status_stopped();
+                break;
+            }
+
+            let events = match events {
+                Ok(ev) => {
+                    let mut text_n = 0usize;
+                    let mut reasoning_n = 0usize;
+                    let mut tool_n = 0usize;
+                    for e in &ev {
+                        match &e.event_type {
+                            StreamEventType::Text(_) => text_n += 1,
+                            StreamEventType::Reasoning(_) => reasoning_n += 1,
+                            StreamEventType::ToolCall { .. } => tool_n += 1,
+                            StreamEventType::Done => {}
+                        }
+                    }
+                    debug::log(
+                        "provider",
+                        &format!(
+                            "stream_chat ok events={} text={text_n} reasoning={reasoning_n} tools={tool_n}",
+                            ev.len()
+                        ),
+                    );
+                    ev
+                }
+                Err(e) => {
+                    debug::log("provider", &format!("stream_chat error: {e}"));
+                    return Err(e);
+                }
+            };
 
             let mut assistant_text = String::new();
             let mut thinking_text = String::new();
             let mut tool_calls: Vec<(String, String, String)> = Vec::new();
 
+            #[cfg(feature = "tui")]
+            {
+                assistant_text = stream_writer.text.clone();
+                thinking_text = stream_writer.reasoning.clone();
+            }
+
+            #[cfg(not(feature = "tui"))]
             for event in &events {
                 match &event.event_type {
-                    StreamEventType::Text(text) => {
-                        assistant_text.push_str(text);
-                    }
+                    StreamEventType::Text(text) => assistant_text.push_str(text),
+                    StreamEventType::Reasoning(text) => thinking_text.push_str(text),
                     StreamEventType::ToolCall { id, name, arguments } => {
                         tool_calls.push((id.clone(), name.clone(), arguments.clone()));
                     }
@@ -130,40 +307,128 @@ impl Agent {
                 }
             }
 
+            #[cfg(feature = "tui")]
+            let agent_started = stream_writer.agent_started;
+
+            #[cfg(feature = "tui")]
+            for event in &events {
+                match &event.event_type {
+                    StreamEventType::ToolCall { id, name, arguments } => {
+                        tool_calls.push((id.clone(), name.clone(), arguments.clone()));
+                    }
+                    _ => {}
+                }
+            }
+
             if tool_calls.is_empty() {
-                // Text-only response
+                if should_retry_post_tool_continuation(
+                    tools_ran_this_turn,
+                    &assistant_text,
+                    &thinking_text,
+                    tool_calls.len(),
+                ) {
+                    if empty_continuation_retries < MAX_EMPTY_CONTINUATION_RETRIES {
+                        empty_continuation_retries += 1;
+                        debug::log(
+                            "agent",
+                            &format!("empty continuation retry {empty_continuation_retries}"),
+                        );
+                        #[cfg(feature = "tui")]
+                        tui::print_system_note("Retrying…");
+                        continue;
+                    }
+                    if !continuation_nudge_injected {
+                        continuation_nudge_injected = true;
+                        debug::log("agent", "continuation nudge injected");
+                        self.messages.push(Message {
+                            role: "user".to_string(),
+                            content: Some(CONTINUATION_NUDGE.to_string()),
+                            tool_calls: None,
+                            tool_call_id: None,
+                            reasoning_content: None,
+                        });
+                        #[cfg(feature = "tui")]
+                        tui::print_system_note("Retrying…");
+                        continue;
+                    }
+
+                    #[cfg(feature = "tui")]
+                    {
+                        if !thinking_text.is_empty() {
+                            // reasoning-only after tools — unlikely here
+                        } else {
+                            tui::print_system_note("No response from model after tools.");
+                        }
+                    }
+
+                    debug::log(
+                        "agent",
+                        &format!(
+                            "inner loop exit: empty_tools assistant_len={} tools_ran={tools_ran_this_turn} retries={empty_continuation_retries} nudge={continuation_nudge_injected}",
+                            assistant_text.len()
+                        ),
+                    );
+
+                    append_to_log(
+                        chat_log.to_str().unwrap_or("chat.log"),
+                        &format!("ASSISTANT: {assistant_text}\n"),
+                    );
+                    break;
+                }
+
                 self.messages.push(Message {
                     role: "assistant".to_string(),
-                    content: Some(assistant_text.clone()),
+                    content: if assistant_text.is_empty() {
+                        None
+                    } else {
+                        Some(assistant_text.clone())
+                    },
                     tool_calls: None,
                     tool_call_id: None,
+                    reasoning_content: None,
                 });
                 self.message_count += 1;
 
-                // Show thinking block if any
                 #[cfg(feature = "tui")]
-                if !thinking_text.is_empty() {
-                    let line_count = thinking_text.lines().count();
-                    let display = if line_count > 100 {
-                        // Write full to log
-                        let _ = std::fs::write(&thinking_log, &thinking_text);
-                        thinking_text.lines().take(100).collect::<Vec<_>>().join("\n")
-                    } else {
-                        thinking_text.clone()
-                    };
-                    let log_ref = if line_count > 100 { thinking_log.as_str() } else { "" };
-                    tui::print_thinking_block(&display, log_ref);
+                {
+                    if !thinking_text.is_empty() {
+                        let line_count = thinking_text.lines().count();
+                        if line_count > 100 {
+                            let _ = std::fs::write(&thinking_log, &thinking_text);
+                        }
+                    }
+                    if assistant_text.is_empty() && !thinking_text.is_empty() {
+                        // Reasoning-only turn: already streamed inline
+                    } else if assistant_text.is_empty() {
+                        tui::print_system_note("No response from model.");
+                    }
                 }
 
-                // Show agent text
-                #[cfg(feature = "tui")]
-                tui::print_agent_text(&assistant_text);
+                debug::log(
+                    "agent",
+                    &format!(
+                        "inner loop exit: empty_tools assistant_len={} tools_ran={tools_ran_this_turn}",
+                        assistant_text.len()
+                    ),
+                );
 
+                append_to_log(
+                    chat_log.to_str().unwrap_or("chat.log"),
+                    &format!("ASSISTANT: {assistant_text}\n"),
+                );
                 break;
             } else {
-                // Response with tool calls — may have partial text first
+                empty_continuation_retries = 0;
+
+                debug::log(
+                    "agent",
+                    &format!("tool_calls count={}", tool_calls.len()),
+                );
+
                 #[cfg(feature = "tui")]
-                if !assistant_text.is_empty() {
+                if assistant_text.is_empty() && !thinking_text.is_empty() {
+                    // partial stream already shown
+                } else if !assistant_text.is_empty() && !agent_started {
                     tui::print_agent_text(&assistant_text);
                 }
 
@@ -181,21 +446,34 @@ impl Agent {
 
                 self.messages.push(Message {
                     role: "assistant".to_string(),
-                    content: if assistant_text.is_empty() { None } else { Some(assistant_text) },
+                    content: if assistant_text.is_empty() {
+                        None
+                    } else {
+                        Some(assistant_text)
+                    },
                     tool_calls: Some(tc_objects),
                     tool_call_id: None,
+                    reasoning_content: Some(thinking_text.clone()),
                 });
 
-                // Execute each tool
                 for (id, name, args_str) in &tool_calls {
-                    // Check tool risk level and request approval if needed
-                    let risk = tool_registry
-                        .get(name)
-                        .map(|t| t.risk_level())
-                        .unwrap_or(RiskLevel::Safe);
+                    if self.interrupt.load(Ordering::Relaxed) {
+                        #[cfg(feature = "tui")]
+                        tui::print_status_stopped();
+                        break;
+                    }
 
-                    let needs_approval = matches!(risk, RiskLevel::Mutating | RiskLevel::Destructive)
-                        && !self.session_approved_tools.contains(name);
+                    let args: serde_json::Value =
+                        serde_json::from_str(args_str).unwrap_or(serde_json::json!({}));
+
+                    let risk = crate::tools::effective_risk(name, &args, &tool_registry);
+
+                    let approved = self.global_approved_tools.contains(name)
+                        || self.session_approved_tools.contains(name);
+
+                    let needs_approval = risk == crate::tools::RiskLevel::Destructive
+                        && self.config.tool_policy.ask_before_destructive
+                        && !approved;
 
                     if needs_approval {
                         #[cfg(feature = "tui")]
@@ -206,113 +484,189 @@ impl Agent {
                                 risk_level: format!("{:?}", risk),
                                 selected: 0,
                             };
-                            tui::print_approval_modal(&modal);
-                            // Read user approval choice
-                            print!("  Choice [D/O/S/A]: ");
-                            let _ = std::io::Write::flush(&mut std::io::stdout());
-                            let mut choice = String::new();
-                            let _ = std::io::stdin().read_line(&mut choice);
-                            match choice.trim().to_uppercase().as_str() {
-                                "D" | "" => {
-                                    // Deny — push a tool result indicating denial
-                                    tui::print_system_note(&format!("Denied: {}", name));
+                            match run_approval_modal(&modal) {
+                                tui::ApprovalChoice::Deny { comment } => {
+                                    tui::print_system_note(&format!("Denied: {name}"));
+                                    let msg = match comment.filter(|c| !c.trim().is_empty()) {
+                                        Some(c) => {
+                                            format!("[Tool '{name}' was denied by user: {c}]")
+                                        }
+                                        None => format!("[Tool '{name}' was denied by user]"),
+                                    };
                                     self.messages.push(Message {
                                         role: "tool".to_string(),
-                                        content: Some(format!("[Tool '{}' was denied by user]", name)),
+                                        content: Some(msg),
                                         tool_calls: None,
                                         tool_call_id: Some(id.clone()),
+                                        reasoning_content: None,
                                     });
                                     continue;
                                 }
-                                "S" => {
-                                    // Approve for session
+                                tui::ApprovalChoice::ApproveSession => {
                                     self.session_approved_tools.push(name.clone());
-                                    tui::print_system_note(&format!("Approved for session: {}", name));
+                                    tui::print_system_note(&format!("Approved for session: {name}"));
                                 }
-                                "A" => {
-                                    // Approve always — TODO: persist to global config
+                                tui::ApprovalChoice::ApproveAlways => {
                                     self.session_approved_tools.push(name.clone());
-                                    tui::print_system_note(&format!("Approved always: {} (persisted next release)", name));
+                                    self.global_approved_tools.push(name.clone());
+                                    let _ = self.config.approve_tool_globally(name);
+                                    tui::print_system_note(&format!("Approved always: {name}"));
                                 }
-                                _ => {
-                                    // "O" or anything else = Approve Once
-                                    tui::print_system_note(&format!("Approved once: {}", name));
+                                tui::ApprovalChoice::ApproveOnce => {
+                                    tui::print_system_note(&format!("Approved once: {name}"));
                                 }
                             }
                         }
                         #[cfg(not(feature = "tui"))]
                         {
-                            println!("Approval required for tool '{}'. Allow? [y/N]", name);
+                            println!("Approval required for tool '{name}'. Allow? [y/N]");
                             let mut ans = String::new();
                             let _ = std::io::stdin().read_line(&mut ans);
                             if !ans.trim().eq_ignore_ascii_case("y") {
                                 self.messages.push(Message {
                                     role: "tool".to_string(),
-                                    content: Some(format!("[Tool '{}' was denied by user]", name)),
+                                    content: Some(format!("[Tool '{name}' was denied by user]")),
                                     tool_calls: None,
                                     tool_call_id: Some(id.clone()),
+                                    reasoning_content: None,
                                 });
                                 continue;
                             }
                         }
                     }
 
-                    // Show tool call line — Running
                     #[cfg(feature = "tui")]
                     {
-                        let preview = args_preview(args_str, 50);
-                        tui::print_tool_call(name, &preview, &tui::ToolStatus::Running, None);
-                    }
+                        tui::layout::set_status_mode(tui::StatusMode::Executing(name.clone()));
+                        let (tool_line_idx, tool_line_count) =
+                            tui::begin_tool_call(name, &args_str);
+                        debug::log("tool", &format!("begin {name} idx={tool_line_idx}"));
 
-                    // Update shimmer mode to Executing
-                    #[cfg(feature = "tui")]
-                    let (exec_shimmer_handle, exec_shimmer_stop, _exec_mode) =
-                        tui::start_shimmer_status(tui::StatusMode::Executing(name.clone()));
+                        let tool_start = std::time::Instant::now();
+                        let prev_content = file_content_before_tool(name, &args);
+                        let result = tool_registry.execute(name, &args);
+                        let tool_elapsed = tool_start.elapsed();
 
-                    let tool_start = std::time::Instant::now();
-                    let args: serde_json::Value =
-                        serde_json::from_str(args_str).unwrap_or(serde_json::json!({}));
-                    let result = tool_registry.execute(name, &args);
-                    let tool_elapsed = tool_start.elapsed();
+                        self.track_memory_write(name, &args, &result);
+                        tools_ran_this_turn = true;
 
-                    // Stop exec shimmer
-                    #[cfg(feature = "tui")]
-                    tui::stop_shimmer(exec_shimmer_handle, exec_shimmer_stop);
+                        tui::layout::set_status_mode(tui::StatusMode::Flowing);
 
-                    // Write tool result to log and show truncated
-                    #[cfg(feature = "tui")]
-                    {
                         let line_count = result.lines().count();
                         let log_ref = if line_count > 50 {
-                            append_to_log(&tool_log, &format!("=== {} ===\n{}\n", name, result));
-                            tool_log.as_str()
+                            append_to_log(
+                                tool_log.to_str().unwrap_or("tool-output.log"),
+                                &format!("=== {name} ===\n{result}\n"),
+                            );
+                            tool_log.display().to_string()
                         } else {
-                            ""
+                            String::new()
                         };
 
-                        // Show completed tool call line
-                        let preview = args_preview(args_str, 50);
-                        tui::print_tool_call(name, &preview, &tui::ToolStatus::Success, Some(tool_elapsed));
-                        tui::print_tool_result(name, &result, log_ref);
+                        let status = tui::tool_status_from_result(name, &result);
+                        tui::update_tool_call(
+                            tool_line_idx,
+                            tool_line_count,
+                            name,
+                            &args_str,
+                            &status,
+                            Some(tool_elapsed),
+                        );
+                        debug::log(
+                            "tool",
+                            &format!(
+                                "done {name} status={status:?} elapsed_ms={}",
+                                tool_elapsed.as_millis()
+                            ),
+                        );
+
+                        if let Some(diff_input) =
+                            diff_input_for_file_tool(name, &args, prev_content.as_deref(), &result)
+                        {
+                            tui::print_tool_diff(diff_input);
+                        } else {
+                            tui::print_tool_result(name, &result, &log_ref);
+                        }
+
+                        self.messages.push(Message {
+                            role: "tool".to_string(),
+                            content: Some(result),
+                            tool_calls: None,
+                            tool_call_id: Some(id.clone()),
+                            reasoning_content: None,
+                        });
+                        self.message_count += 1;
                     }
 
-                    self.messages.push(Message {
-                        role: "tool".to_string(),
-                        content: Some(result),
-                        tool_calls: None,
-                        tool_call_id: Some(id.clone()),
-                    });
-                    self.message_count += 1;
+                    #[cfg(not(feature = "tui"))]
+                    {
+                        let tool_start = std::time::Instant::now();
+                        let result = tool_registry.execute(name, &args);
+                        self.track_memory_write(name, &args, &result);
+                        tools_ran_this_turn = true;
+
+                        self.messages.push(Message {
+                            role: "tool".to_string(),
+                            content: Some(result),
+                            tool_calls: None,
+                            tool_call_id: Some(id.clone()),
+                            reasoning_content: None,
+                        });
+                        self.message_count += 1;
+                    }
                 }
             }
         }
 
-        // Persist session
+        debug::log("agent", "chat() end");
+
+        #[cfg(feature = "tui")]
+        if let Some((desc, file)) = self.turn_memory_footer.clone() {
+            tui::print_memory_footer(&desc, &file);
+        }
+
         if let Some(path) = &self.session_path {
             self.persist_session(path);
         }
 
         Ok(())
+    }
+
+    fn track_memory_write(&mut self, tool_name: &str, args: &serde_json::Value, result: &str) {
+        if tool_name != "write_file" {
+            return;
+        }
+        let Some(path) = args.get("path").and_then(|p| p.as_str()) else {
+            return;
+        };
+        let Some(contents) = args.get("contents").and_then(|c| c.as_str()) else {
+            return;
+        };
+
+        let project_mem = memory::project_memory_path();
+        let global_mem = memory::global_memory_path(&self.config.data_dir);
+        let path_buf = PathBuf::from(path);
+
+        let scope = if path_buf == project_mem {
+            Some(MemoryScope::Project)
+        } else if path_buf == global_mem {
+            Some(MemoryScope::Global)
+        } else {
+            None
+        };
+
+        let Some(scope) = scope else {
+            return;
+        };
+
+        match memory::append_memory(scope, contents, &self.config.data_dir) {
+            Ok((desc, file)) => self.turn_memory_footer = Some((desc, file)),
+            Err(err) => {
+                #[cfg(feature = "tui")]
+                tui::print_system_note(&err);
+                let _ = result;
+            }
+        }
     }
 
     fn persist_session(&self, path: &str) {
@@ -329,6 +683,13 @@ impl Agent {
     }
 }
 
+fn session_log_dir(config: &Config, session_id: &str) -> PathBuf {
+    config
+        .data_dir_path()
+        .join("sessions")
+        .join(session_id)
+}
+
 fn args_preview(args_str: &str, max_len: usize) -> String {
     if args_str.len() > max_len {
         format!("{}...", &args_str[..max_len.saturating_sub(3)])
@@ -337,15 +698,63 @@ fn args_preview(args_str: &str, max_len: usize) -> String {
     }
 }
 
-fn append_to_log(path: &str, content: &str) {
-    use std::io::Write;
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-        let _ = f.write_all(content.as_bytes());
+#[cfg(feature = "tui")]
+fn file_content_before_tool(tool_name: &str, args: &serde_json::Value) -> Option<String> {
+    if tool_name != "edit_file" && tool_name != "write_file" {
+        return None;
+    }
+    let path = args.get("path")?.as_str()?;
+    std::fs::read_to_string(path).ok()
+}
+
+#[cfg(feature = "tui")]
+fn diff_input_for_file_tool(
+    tool_name: &str,
+    args: &serde_json::Value,
+    prev_content: Option<&str>,
+    result: &str,
+) -> Option<tui::DiffInput> {
+    let path = args.get("path")?.as_str()?.to_string();
+    match tool_name {
+        "edit_file" if result.starts_with("File edited:") => {
+            let old_string = args.get("old_string")?.as_str()?;
+            let new_string = args.get("new_string")?.as_str()?;
+            let old_text = prev_content.unwrap_or("").to_string();
+            let new_text = old_text.replacen(old_string, new_string, 1);
+            Some(tui::DiffInput {
+                path,
+                old_text,
+                new_text,
+                kind: tui::DiffKind::Edit,
+            })
+        }
+        "write_file" if result.starts_with("File written:") => {
+            let new_text = args.get("contents")?.as_str()?.to_string();
+            let kind = if prev_content.is_some() {
+                tui::DiffKind::WriteOverwrite
+            } else {
+                tui::DiffKind::WriteCreate
+            };
+            Some(tui::DiffInput {
+                path,
+                old_text: prev_content.unwrap_or("").to_string(),
+                new_text,
+                kind,
+            })
+        }
+        _ => None,
     }
 }
 
-fn home_dir() -> String {
-    std::env::var("HOME").unwrap_or_else(|_| ".".to_string())
+fn append_to_log(path: &str, content: &str) {
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = f.write_all(content.as_bytes());
+    }
 }
 
 #[cfg(feature = "tui")]
@@ -356,4 +765,65 @@ fn tui_width() -> usize {
 #[cfg(not(feature = "tui"))]
 fn tui_width() -> usize {
     80
+}
+
+#[cfg(test)]
+mod continuation_tests {
+    use super::*;
+
+    #[test]
+    fn empty_response_detected() {
+        assert!(is_empty_provider_response("", "", 0));
+        assert!(!is_empty_provider_response("hi", "", 0));
+        assert!(!is_empty_provider_response("", "think", 0));
+        assert!(!is_empty_provider_response("", "", 1));
+    }
+
+    #[test]
+    fn post_tool_retry_only_when_tools_ran() {
+        assert!(should_retry_post_tool_continuation(true, "", "", 0));
+        assert!(!should_retry_post_tool_continuation(false, "", "", 0));
+        assert!(!should_retry_post_tool_continuation(true, "ok", "", 0));
+    }
+}
+
+#[cfg(all(test, feature = "tui"))]
+mod smoke_tests {
+    use super::*;
+    use crate::config::{ApiFormat, Config, ProviderConfig, ToolPolicy};
+
+    fn opengateway_config() -> Config {
+        Config {
+            data_dir: ".zero-agent".to_string(),
+            default_provider: "opengateway".to_string(),
+            providers: vec![ProviderConfig {
+                id: "opengateway".to_string(),
+                name: "OpenGateway (gitlawb)".to_string(),
+                api_format: ApiFormat::OpenAI,
+                base_url: "https://opengateway.gitlawb.com/v1".to_string(),
+                api_key: String::new(),
+                default_model: "mimo-v2.5-pro".to_string(),
+                models: vec!["mimo-v2.5-pro".to_string()],
+                requires_api_key: None,
+            }],
+            tool_policy: ToolPolicy {
+                allow_safe_without_prompt: true,
+                ask_before_mutating: false,
+                ask_before_destructive: true,
+                globally_approved_tools: Vec::new(),
+            },
+            telegram: Default::default(),
+            config_path: None,
+            resolved_data_dir: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_chat_opengateway_without_api_key() {
+        let mut agent = Agent::new(opengateway_config(), None);
+        agent
+            .chat("Do not use any tools. Reply in plain text with exactly: zero-agent-ok")
+            .await
+            .expect("agent chat should succeed against opengateway without api key");
+    }
 }

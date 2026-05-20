@@ -5,9 +5,10 @@ edition = "2024"
 
 [features]
 default = []
-tui = []
+tui = ["crossterm"]
 
 [dependencies]
+crossterm = { version = "0.28", optional = true }
 glob = "0.3"
 tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.12", features = ["stream", "json"] }
@@ -16,3 +17,4 @@ serde_json = "1"
 futures = "0.3"
 chrono = "0.4"
 async-trait = "0.1"
+similar = "2"

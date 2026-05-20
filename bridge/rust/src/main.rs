@@ -1,49 +1,143 @@
+#![allow(dead_code)]
+
 #[cfg(feature = "tui")]
 pub mod tui;
 
 mod agent;
 mod config;
+mod debug;
+mod memory;
 mod gateway;
 mod provider;
 mod tools;
+#[cfg(feature = "tui")]
+mod profile;
 
 use std::char;
 use std::io::{self, BufRead, Write};
+use std::path::PathBuf;
 
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = std::env::args().collect();
+    debug::init_from_env_and_args(&args);
 
-    if args.get(1).map(|s| s.as_str()) == Some("--bridge") {
+    if args.iter().any(|a| a == "--bridge") {
         bridge_mode().expect("bridge mode failed");
     } else {
         interactive_mode().await;
     }
 }
 
-async fn interactive_mode() {
-    let cfg = config::Config::load();
+fn parse_config_flag(args: &[String]) -> Option<PathBuf> {
+    args.iter()
+        .position(|a| a == "--config")
+        .and_then(|i| args.get(i + 1))
+        .map(PathBuf::from)
+}
 
-    // Check if provider has an API key configured
+async fn interactive_mode() {
+    let args: Vec<String> = std::env::args().collect();
+    let config_path = parse_config_flag(&args);
+    let mut cfg = if let Some(ref path) = config_path {
+        config::Config::load_from(Some(path))
+    } else {
+        config::Config::load()
+    };
+
     let provider = cfg.default_provider();
-    if provider.api_key.is_empty()
-        && !provider.base_url.contains("localhost")
-    {
-        eprintln!("\x1b[1;33m!\x1b[0m No API key configured for provider '{}'", provider.name);
-        eprintln!("  Edit: {}/config.json", cfg.data_dir);
+    if provider.requires_api_key() && provider.api_key.is_empty() {
+        eprintln!(
+            "\x1b[1;33m!\x1b[0m No API key configured for provider '{}'",
+            provider.name
+        );
+        eprintln!("  Edit: {}", cfg.config_display_path());
         eprintln!("  Set \"api_key\" for your provider.\n");
     }
 
-    let mut agent = agent::Agent::new(&cfg, None);
+    let mut agent = agent::Agent::new(cfg.clone(), None);
+
+    debug::set_log_path(
+        cfg.data_dir_path()
+            .join("sessions")
+            .join(agent.session_id())
+            .join("debug.log"),
+    );
 
     #[cfg(feature = "tui")]
-    {
+    let cwd = std::env::current_dir()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| ".".into());
+    #[cfg(feature = "tui")]
+    let tool_names: Vec<String> = tools::ToolRegistry::default()
+        .list()
+        .into_iter()
+        .map(|(name, _, _)| name.to_string())
+        .collect();
+
+    #[cfg(feature = "tui")]
+    let mut app = {
         let mut app = tui::App::new();
         app.model = agent.model().to_string();
         app.provider = agent.provider_id().to_string();
         app.session_name = "main".to_string();
         app.session_id = agent.session_id().to_string();
-        tui::print_header(&app);
+        app
+    };
+
+    #[cfg(feature = "tui")]
+    let mut input = tui::input::InteractiveInput::new();
+
+    #[cfg(feature = "tui")]
+    let _terminal = match tui::layout::TerminalSession::enter() {
+        Ok(session) => session,
+        Err(e) => {
+            eprintln!("TUI init failed: {e}");
+            return;
+        }
+    };
+
+    #[cfg(feature = "tui")]
+    {
+        match tui::layout::ScreenLayout::init(&app, &tool_names, &cwd) {
+            Ok(layout) => layout.install_global(),
+            Err(e) => {
+                tui::layout::append_system_note(&format!("TUI layout init failed: {e}"));
+            }
+        }
+        tui::layout::set_footer_app(&app);
+
+        let data_dir = cfg.data_dir_path();
+        let profile_file = profile::ProfileFile::load(&data_dir);
+        app.profile = profile_file.to_user_profile();
+        app.response_style = app.profile.style.clone();
+        if !app.profile.name.is_empty() {
+            tui::layout::set_user_display_name(&app.profile.name);
+        }
+        agent.apply_profile(&app.profile);
+
+        if profile::needs_onboarding(&data_dir) {
+            match tui::onboarding::run_onboarding(&app) {
+                Ok(tui::onboarding::OnboardingResult::Completed(profile)) => {
+                    app.profile = profile.clone();
+                    app.response_style = profile.style.clone();
+                    tui::layout::set_user_display_name(&profile.name);
+                    agent.apply_profile(&profile);
+                    let saved = profile::ProfileFile::from_user_profile(&profile);
+                    let mut complete = saved;
+                    complete.onboarding_complete = true;
+                    if let Err(e) = complete.save(&data_dir) {
+                        tui::print_system_note(&format!("Could not save profile: {e}"));
+                    }
+                    tui::layout::enter_chat_mode(&app, &tool_names, &cwd);
+                }
+                Ok(tui::onboarding::OnboardingResult::Cancelled) => return,
+                Err(e) => {
+                    tui::print_system_note(&format!("Onboarding error: {e}"));
+                    return;
+                }
+            }
+        }
     }
 
     #[cfg(not(feature = "tui"))]
@@ -54,80 +148,160 @@ async fn interactive_mode() {
         println!("\x1b[1;36m\u{2514}\x1b[0m");
     }
 
-    let stdin = io::stdin();
-
     loop {
         #[cfg(feature = "tui")]
-        {
-            let mut app = tui::App::new();
+        let input_line = {
             app.model = agent.model().to_string();
             app.provider = agent.provider_id().to_string();
-            tui::print_prompt(&app);
-        }
+            app.session_id = agent.session_id().to_string();
+            tui::layout::set_footer_app(&app);
+            tui::layout::set_status_mode(tui::StatusMode::Idle);
+            match input.read_line(&app) {
+                Ok(tui::input::InputResult::Submit(line)) => line,
+                Ok(tui::input::InputResult::Interrupt) => {
+                    agent.request_interrupt();
+                    tui::print_status_stopped();
+                    continue;
+                }
+                Ok(tui::input::InputResult::Empty) => continue,
+                Err(e) => {
+                    eprintln!("Input error: {e}");
+                    break;
+                }
+            }
+        };
 
         #[cfg(not(feature = "tui"))]
-        {
+        let input_line = {
             print!("\n\x1b[1;32m>\x1b[0m ");
-        }
-        io::stdout().flush().unwrap();
-
-        let mut input = String::new();
-        match stdin.lock().read_line(&mut input) {
-            Ok(0) => break, // EOF
-            Ok(_) => {}
-            Err(e) => {
-                eprintln!("Input error: {e}");
-                break;
+            io::stdout().flush().unwrap();
+            let mut line = String::new();
+            match io::stdin().lock().read_line(&mut line) {
+                Ok(0) => break,
+                Ok(_) => line.trim().to_string(),
+                Err(e) => {
+                    eprintln!("Input error: {e}");
+                    break;
+                }
             }
-        }
+        };
 
-        let input = input.trim();
-        if input.is_empty() {
+        if input_line.is_empty() {
             continue;
         }
 
-        // Slash command palette hint
         #[cfg(feature = "tui")]
-        if input.starts_with('/') && input.len() > 1 {
-            let filter = &input[1..];
-            // Check for exact command match first
-            let exact = tui::all_slash_commands().into_iter().find(|c| c.name == filter.split_whitespace().next().unwrap_or(""));
-            if exact.is_none() {
-                // Show palette and continue to next prompt
-                tui::print_slash_palette(filter);
+        if input_line.starts_with('/') {
+            let rest = input_line.trim_start_matches('/');
+            let cmd_name = rest.split_whitespace().next().unwrap_or("");
+            if cmd_name.is_empty() {
+                tui::print_slash_palette("");
                 continue;
             }
-        } else if input == "/" {
-            #[cfg(feature = "tui")]
-            tui::print_slash_palette("");
-            continue;
+            let is_known = input_line.starts_with("/reasoning")
+                || input_line.starts_with("/debug")
+                || tui::all_slash_commands().iter().any(|c| {
+                    c.name == cmd_name
+                        && (rest == c.name || rest.starts_with(&format!("{} ", c.name)))
+                });
+            if !is_known {
+                tui::print_slash_palette(cmd_name);
+                continue;
+            }
         }
 
-        match input {
+        match input_line.as_str() {
             "/quit" | "/exit" | "/q" => break,
             "/help" => {
                 #[cfg(feature = "tui")]
                 tui::print_help();
-                #[cfg(not(feature = "tui"))]
+                continue;
+            }
+            "/clear" => {
+                #[cfg(feature = "tui")]
                 {
-                    println!("Commands:");
-                    println!("  /quit /exit /q  Exit");
-                    println!("  /help           Show this help");
+                    app.session_id = agent.session_id().to_string();
+                    tui::layout::clear_transcript(&app, &tool_names, &cwd);
+                    tui::layout::set_footer_app(&app);
                 }
                 continue;
             }
             "/provider" => {
+                #[cfg(feature = "tui")]
+                {
+                    let providers: Vec<String> = cfg.providers.iter().map(|p| p.id.clone()).collect();
+                    if let Some(selected) = tui::input::run_provider_picker(&providers, agent.provider_id()) {
+                        match agent.set_provider(&selected) {
+                            Ok(()) => {
+                                cfg = config::Config::load();
+                                app.provider = agent.provider_id().to_string();
+                                app.model = agent.model().to_string();
+                                tui::print_system_note(&format!("Provider set to {selected}"));
+                            }
+                            Err(e) => tui::print_system_note(&e),
+                        }
+                    }
+                }
+                #[cfg(not(feature = "tui"))]
                 println!("Provider: {}", agent.provider_info());
+                continue;
+            }
+            "/model" => {
+                #[cfg(feature = "tui")]
+                {
+                    let models = agent.discover_models().await;
+                    match tui::input::run_model_picker(&models, agent.provider_id()) {
+                        tui::input::ModelPickerResult::Selected(model) => {
+                            match agent.set_model(&model) {
+                                Ok(()) => {
+                                    cfg = config::Config::load();
+                                    app.model = model.clone();
+                                    tui::print_system_note(&format!("Model set to {model}"));
+                                }
+                                Err(e) => tui::print_system_note(&e),
+                            }
+                        }
+                        tui::input::ModelPickerResult::ChangeProvider => {
+                            let providers: Vec<String> =
+                                cfg.providers.iter().map(|p| p.id.clone()).collect();
+                            if let Some(selected) =
+                                tui::input::run_provider_picker(&providers, agent.provider_id())
+                            {
+                                let _ = agent.set_provider(&selected);
+                                cfg = config::Config::load();
+                                app.provider = agent.provider_id().to_string();
+                                app.model = agent.model().to_string();
+                            }
+                        }
+                        tui::input::ModelPickerResult::Cancelled => {}
+                    }
+                }
+                continue;
+            }
+            "/memory" => {
+                let data_dir = cfg.data_dir_path().to_string_lossy().into_owned();
+                let listing = memory::list_memories(&data_dir);
+                #[cfg(feature = "tui")]
+                {
+                    for line in listing.lines() {
+                        tui::print_system_note(line);
+                    }
+                }
+                #[cfg(not(feature = "tui"))]
+                println!("{listing}");
                 continue;
             }
             "/status" => {
                 #[cfg(feature = "tui")]
                 {
-                    let mut app = tui::App::new();
                     app.model = agent.model().to_string();
                     app.provider = agent.provider_id().to_string();
                     app.session_id = agent.session_id().to_string();
                     tui::print_status_info(&app);
+                    tui::print_system_note(&format!("Config: {}", cfg.config_display_path()));
+                    if !cfg.default_provider().requires_api_key() {
+                        tui::print_system_note("Auth: no API key required for this provider");
+                    }
                 }
                 #[cfg(not(feature = "tui"))]
                 println!("Status: {}", agent.provider_info());
@@ -135,35 +309,118 @@ async fn interactive_mode() {
             }
             "/profile" => {
                 #[cfg(feature = "tui")]
+                tui::print_profile(&app.profile);
+                continue;
+            }
+            cmd if cmd.starts_with("/debug") => {
+                #[cfg(feature = "tui")]
                 {
-                    let app = tui::App::new();
-                    tui::print_profile(&app.profile);
+                    let rest = input_line.trim_start_matches("/debug").trim();
+                    match rest {
+                        "on" => {
+                            debug::set_enabled(true);
+                            tui::print_system_note("Debug logging enabled");
+                        }
+                        "off" => {
+                            debug::set_enabled(false);
+                            tui::print_system_note("Debug logging disabled");
+                        }
+                        "status" => {
+                            let state = if debug::is_enabled() { "on" } else { "off" };
+                            let path =
+                                debug::log_path_display().unwrap_or_else(|| "(not set)".into());
+                            tui::print_system_note(&format!("Debug: {state} — log: {path}"));
+                        }
+                        "" => {
+                            let on = debug::toggle();
+                            let state = if on { "on" } else { "off" };
+                            tui::print_system_note(&format!("Debug logging {state}"));
+                        }
+                        _ => {
+                            tui::print_system_note("Usage: /debug | /debug on | off | status");
+                        }
+                    }
                 }
                 continue;
             }
-            _ if input.starts_with('/') => {
+            "/stop" => {
+                agent.request_interrupt();
+                tui::print_status_stopped();
+                continue;
+            }
+            cmd if cmd.starts_with("/reasoning") => {
+                let level = cmd.trim_start_matches("/reasoning").trim();
+                let label = match level {
+                    "low" => "low",
+                    "med" | "medium" => "med",
+                    "high" => "high",
+                    "x-high" | "xhigh" | "extra" => "x-high",
+                    "thinking" => "thinking",
+                    "off" | "" => "",
+                    _ => {
+                        #[cfg(feature = "tui")]
+                        tui::print_system_note(
+                            "Usage: /reasoning off | low | med | high | x-high | thinking",
+                        );
+                        continue;
+                    }
+                };
                 #[cfg(feature = "tui")]
-                tui::print_system_note(&format!("Unknown command: {}", input));
-                #[cfg(not(feature = "tui"))]
-                println!("Unknown command: {}", input);
+                {
+                    app.reasoning_label = label.to_string();
+                    if label.is_empty() {
+                        tui::print_system_note(&format!("Reasoning off — model: {}", app.model));
+                    } else {
+                        tui::print_system_note(&format!(
+                            "Reasoning set to '{label}' — model: {} ({label})",
+                            app.model
+                        ));
+                    }
+                }
+                continue;
+            }
+            cmd if cmd.starts_with('/') => {
+                #[cfg(feature = "tui")]
+                {
+                    let cmd_name = cmd.trim_start_matches('/').split_whitespace().next().unwrap_or("");
+                    if tui::filter_slash_commands(cmd_name).is_empty() {
+                        tui::print_system_note(&format!("Unknown command: {cmd}"));
+                    } else {
+                        tui::print_system_note(&format!("Command '{cmd}' is not implemented yet."));
+                    }
+                }
                 continue;
             }
             _ => {}
         }
 
-        if let Err(e) = agent.chat(input).await {
+        #[cfg(feature = "tui")]
+        {
+            let listener = tui::input::TurnInputListener::start(agent.interrupt_handle());
+            let chat_result = agent.chat(&input_line).await;
+            drop(listener);
+            if let Err(e) = chat_result {
+                tui::print_system_note(&format!("Error: {e}"));
+            }
+        }
+
+        #[cfg(not(feature = "tui"))]
+        if let Err(e) = agent.chat(&input_line).await {
             eprintln!("\x1b[31mError: {e}\x1b[0m");
+        }
+
+        #[cfg(feature = "tui")]
+        {
+            app.status_mode = tui::StatusMode::Idle;
+            tui::layout::set_status_mode(tui::StatusMode::Idle);
+            tui::layout::set_footer_app(&app);
         }
     }
 
     #[cfg(feature = "tui")]
     {
-        let mut app = tui::App::new();
-        app.model = agent.model().to_string();
-        app.provider = agent.provider_id().to_string();
-        app.session_name = "main".to_string();
-        app.session_id = agent.session_id().to_string();
-        app.start_time = std::time::Instant::now() - std::time::Duration::from_secs_f64(agent.elapsed_secs());
+        app.start_time =
+            std::time::Instant::now() - std::time::Duration::from_secs_f64(agent.elapsed_secs());
         tui::print_exit_summary(&app);
     }
 
@@ -239,6 +496,8 @@ fn handle_line(line: &str) -> String {
         "setup.save" => setup_save(&id, line),
         "agent.run" => agent_run(&id, line),
         "agent.tool" => agent_tool(&id, line),
+        "tui.render" => tui_render(&id, line),
+        "tui.emit" => tui_emit(&id, line),
         "telegram.poll" => telegram_poll(&id, line),
         "telegram.send" => telegram_send(&id, line),
         "telegram.loop" => telegram_loop(&id, line),
@@ -1495,6 +1754,72 @@ fn agent_run(id: &str, line: &str) -> String {
         json_string(&provider),
         json_string(&model)
     )
+}
+
+#[cfg(feature = "tui")]
+fn tui_render(id: &str, line: &str) -> String {
+    let payload = match json_field(line, "event") {
+        Ok(Some(v)) => v,
+        Ok(None) => return error_response(id, "missing event"),
+        Err(_) => return error_response(id, "invalid bridge request"),
+    };
+    let mut ctx = tui::render::RenderContext {
+        app: tui::App::new(),
+        width: tui::get_terminal_size().0,
+    };
+    match tui::render::render_event(&mut ctx, &payload) {
+        Ok(()) => format!(
+            "{{\"id\":{},\"ok\":true,\"event\":\"tui.rendered\",\"output\":{{}}}}",
+            json_string(id)
+        ),
+        Err(e) => error_response(id, &e),
+    }
+}
+
+#[cfg(not(feature = "tui"))]
+fn tui_render(id: &str, _line: &str) -> String {
+    error_response(id, "tui feature not enabled")
+}
+
+#[cfg(feature = "tui")]
+fn tui_emit(id: &str, line: &str) -> String {
+    let kind = match json_field(line, "kind") {
+        Ok(Some(v)) => v,
+        Ok(None) => return error_response(id, "missing kind"),
+        Err(_) => return error_response(id, "invalid bridge request"),
+    };
+    let mut ctx = tui::render::RenderContext {
+        app: tui::App::new(),
+        width: tui::get_terminal_size().0,
+    };
+    if kind == "SessionStarted" {
+        let config_path = json_field(line, "config_path")
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| ".zero-agent/config.json".into());
+        let cwd = json_field(line, "cwd")
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| ".".into());
+        let no_auth = json_field(line, "no_auth")
+            .ok()
+            .flatten()
+            .map(|v| v == "true")
+            .unwrap_or(false);
+        tui::render::render_session_started(&mut ctx, &config_path, &cwd, no_auth);
+    } else {
+        let _ = tui::render::render_event(&mut ctx, line);
+    }
+    format!(
+        "{{\"id\":{},\"ok\":true,\"event\":\"tui.emitted\",\"output\":{{\"kind\":{}}}}}",
+        json_string(id),
+        json_string(&kind)
+    )
+}
+
+#[cfg(not(feature = "tui"))]
+fn tui_emit(id: &str, _line: &str) -> String {
+    error_response(id, "tui feature not enabled")
 }
 
 fn agent_tool(id: &str, line: &str) -> String {

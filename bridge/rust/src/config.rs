@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -9,6 +9,12 @@ pub struct Config {
     pub tool_policy: ToolPolicy,
     #[serde(default)]
     pub telegram: TelegramConfig,
+    /// Absolute path to the loaded config.json (not serialized).
+    #[serde(skip)]
+    pub config_path: Option<PathBuf>,
+    /// Resolved absolute data directory (not serialized).
+    #[serde(skip)]
+    pub resolved_data_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -21,6 +27,21 @@ pub struct ProviderConfig {
     pub default_model: String,
     #[serde(default)]
     pub models: Vec<String>,
+    /// When false, empty api_key is allowed. Defaults from provider id when omitted.
+    #[serde(default)]
+    pub requires_api_key: Option<bool>,
+}
+
+impl ProviderConfig {
+    pub fn requires_api_key(&self) -> bool {
+        if let Some(v) = self.requires_api_key {
+            return v;
+        }
+        match self.id.as_str() {
+            "opengateway" | "ollama-local" => false,
+            _ => !self.base_url.contains("localhost") && !self.base_url.contains("127.0.0.1"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -35,6 +56,8 @@ pub struct ToolPolicy {
     pub allow_safe_without_prompt: bool,
     pub ask_before_mutating: bool,
     pub ask_before_destructive: bool,
+    #[serde(default)]
+    pub globally_approved_tools: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -59,6 +82,7 @@ impl Default for Config {
                     api_key: String::new(),
                     default_model: "deepseek-v4-pro".to_string(),
                     models: vec!["deepseek-v4-pro".to_string()],
+                    requires_api_key: None,
                 },
                 ProviderConfig {
                     id: "openrouter".to_string(),
@@ -68,6 +92,7 @@ impl Default for Config {
                     api_key: String::new(),
                     default_model: String::new(),
                     models: vec![],
+                    requires_api_key: None,
                 },
                 ProviderConfig {
                     id: "openai".to_string(),
@@ -77,6 +102,7 @@ impl Default for Config {
                     api_key: String::new(),
                     default_model: "gpt-4o".to_string(),
                     models: vec![],
+                    requires_api_key: None,
                 },
                 ProviderConfig {
                     id: "anthropic".to_string(),
@@ -86,6 +112,7 @@ impl Default for Config {
                     api_key: String::new(),
                     default_model: "claude-sonnet-4-20250514".to_string(),
                     models: vec![],
+                    requires_api_key: None,
                 },
                 ProviderConfig {
                     id: "ollama-local".to_string(),
@@ -95,55 +122,83 @@ impl Default for Config {
                     api_key: String::new(),
                     default_model: "llama3".to_string(),
                     models: vec![],
+                    requires_api_key: None,
                 },
             ],
             tool_policy: ToolPolicy {
                 allow_safe_without_prompt: true,
-                ask_before_mutating: true,
+                ask_before_mutating: false,
                 ask_before_destructive: true,
+                globally_approved_tools: Vec::new(),
             },
             telegram: TelegramConfig::default(),
+            config_path: None,
+            resolved_data_dir: None,
         }
     }
 }
 
 impl Config {
     pub fn config_path(&self) -> PathBuf {
-        PathBuf::from(&self.data_dir).join("config.json")
+        self.config_path
+            .clone()
+            .unwrap_or_else(|| self.data_dir_path().join("config.json"))
+    }
+
+    pub fn data_dir_path(&self) -> PathBuf {
+        self.resolved_data_dir
+            .clone()
+            .unwrap_or_else(|| PathBuf::from(&self.data_dir))
     }
 
     pub fn env_path(&self) -> PathBuf {
-        PathBuf::from(&self.data_dir).join(".env")
+        self.data_dir_path().join(".env")
     }
 
     pub fn soul_path(&self) -> PathBuf {
-        PathBuf::from(&self.data_dir).join("SOUL.md")
+        self.data_dir_path().join("SOUL.md")
     }
 
     pub fn sessions_dir(&self) -> PathBuf {
-        PathBuf::from(&self.data_dir).join("sessions")
+        self.resolved_data_dir
+            .clone()
+            .unwrap_or_else(|| PathBuf::from(&self.data_dir))
+            .join("sessions")
     }
 
     pub fn load() -> Self {
-        let default = Self::default();
-        let path = default.config_path();
-        let mut config = if path.exists() {
-            match std::fs::read_to_string(&path) {
-                Ok(contents) => serde_json::from_str(&contents).unwrap_or(default),
-                Err(_) => default,
-            }
+        Self::load_from(None)
+    }
+
+    pub fn load_from(explicit_path: Option<&Path>) -> Self {
+        let (path, mut config) = if let Some(p) = explicit_path {
+            load_config_file(p)
+        } else if let Some(found) = discover_config_path() {
+            load_config_file(&found)
         } else {
-            let _ = default.save();
-            default
+            let default = Self::default();
+            let path = default.config_path();
+            if path.exists() {
+                load_config_file(&path)
+            } else {
+                let _ = default.save();
+                (path, default)
+            }
         };
 
-        // Load .env file for API keys
+        config.config_path = Some(path.clone());
+        config.resolved_data_dir = Some(resolve_data_dir(&config, &path));
+
         config.load_env();
-
-        // Ensure directories exist
         let _ = std::fs::create_dir_all(config.sessions_dir());
-
         config
+    }
+
+    pub fn config_display_path(&self) -> String {
+        self.config_path
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| self.config_path().display().to_string())
     }
 
     fn load_env(&mut self) {
@@ -195,7 +250,10 @@ impl Config {
     }
 
     pub fn save(&self) -> Result<(), String> {
-        let path = self.config_path();
+        let path = self
+            .config_path
+            .clone()
+            .unwrap_or_else(|| self.config_path());
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| format!("failed to create config dir: {e}"))?;
@@ -215,5 +273,127 @@ impl Config {
         self.get_provider(&self.default_provider)
             .or_else(|| self.providers.first())
             .expect("no providers configured")
+    }
+
+    pub fn set_default_model(&mut self, model: &str) -> Result<(), String> {
+        let provider_id = self.default_provider.clone();
+        if let Some(provider) = self.providers.iter_mut().find(|p| p.id == provider_id) {
+            provider.default_model = model.to_string();
+        }
+        self.save()
+    }
+
+    pub fn set_default_provider(&mut self, provider_id: &str) -> Result<(), String> {
+        if self.get_provider(provider_id).is_none() {
+            return Err(format!("unknown provider: {provider_id}"));
+        }
+        self.default_provider = provider_id.to_string();
+        self.save()
+    }
+
+    pub fn approve_tool_globally(&mut self, tool_name: &str) -> Result<(), String> {
+        if !self
+            .tool_policy
+            .globally_approved_tools
+            .iter()
+            .any(|t| t == tool_name)
+        {
+            self.tool_policy.globally_approved_tools.push(tool_name.to_string());
+        }
+        self.save()
+    }
+}
+
+fn load_config_file(path: &Path) -> (PathBuf, Config) {
+    let path = path.to_path_buf();
+    let default = Config::default();
+    let config = if path.exists() {
+        match std::fs::read_to_string(&path) {
+            Ok(contents) => serde_json::from_str(&contents).unwrap_or(default),
+            Err(_) => default,
+        }
+    } else {
+        default
+    };
+    (path, config)
+}
+
+fn discover_config_path() -> Option<PathBuf> {
+    if let Ok(mut dir) = std::env::current_dir() {
+        loop {
+            let candidate = dir.join(".zero-agent").join("config.json");
+            if candidate.exists() {
+                return Some(candidate);
+            }
+            if !dir.pop() {
+                break;
+            }
+        }
+    }
+
+    if let Ok(home) = std::env::var("HOME") {
+        let candidate = PathBuf::from(home).join(".zero-agent").join("config.json");
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+
+    std::env::var("ZERO_HOME")
+        .ok()
+        .map(|h| PathBuf::from(h).join("config.json"))
+        .filter(|p| p.exists())
+}
+
+fn resolve_data_dir(config: &Config, config_path: &Path) -> PathBuf {
+    let data = PathBuf::from(&config.data_dir);
+    if data.is_absolute() {
+        return data;
+    }
+    config_path
+        .parent()
+        .map(|p| p.join(&config.data_dir))
+        .unwrap_or(data)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn opengateway_does_not_require_api_key() {
+        let p = ProviderConfig {
+            id: "opengateway".into(),
+            name: "OpenGateway".into(),
+            api_format: ApiFormat::OpenAI,
+            base_url: "https://opengateway.gitlawb.com/v1".into(),
+            api_key: String::new(),
+            default_model: "mimo-v2.5-pro".into(),
+            models: vec![],
+            requires_api_key: None,
+        };
+        assert!(!p.requires_api_key());
+    }
+
+    #[test]
+    fn discovers_config_walking_up_from_subdir() {
+        let tmp = std::env::temp_dir().join(format!("zero-agent-cfg-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(tmp.join("sub/deep")).unwrap();
+        fs::create_dir_all(tmp.join(".zero-agent")).unwrap();
+        fs::write(
+            tmp.join(".zero-agent/config.json"),
+            r#"{"data_dir":".zero-agent","default_provider":"opengateway","providers":[],"tool_policy":{"allow_safe_without_prompt":true,"ask_before_mutating":true,"ask_before_destructive":true}}"#,
+        )
+        .unwrap();
+
+        let prev = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmp.join("sub/deep")).unwrap();
+        let found = discover_config_path();
+        std::env::set_current_dir(prev).unwrap();
+        let _ = fs::remove_dir_all(&tmp);
+
+        assert!(found.is_some());
+        assert!(found.unwrap().ends_with(".zero-agent/config.json"));
     }
 }

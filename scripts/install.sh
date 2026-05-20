@@ -41,12 +41,11 @@ else
 fi
 
 echo "  Building..."
-cd bridge/rust
-cargo build --release --quiet 2>&1
+cargo build --release --quiet --manifest-path bridge/rust/Cargo.toml --features tui 2>&1
 
 echo "  Installing binary..."
 mkdir -p "$BIN_DIR"
-cp target/release/zero-agent-bridge "$BIN_DIR/zero"
+cp bridge/rust/target/release/zero-agent-bridge "$BIN_DIR/zero"
 
 # Add to PATH if not already there
 SHELL_RC="$HOME/.bashrc"
