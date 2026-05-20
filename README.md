@@ -1,6 +1,6 @@
 # Zero-Agent
 
-Zero-Agent is a GPL-3.0, Hermes-inspired daily-use agent built primarily in [Zero](https://zerolang.ai/learn).
+Zero-Agent is an AGPL-3.0, Hermes-inspired daily-use agent built primarily in [Zero](https://zerolang.ai/learn).
 
 It is designed for coding, co-working, productivity, chat, local tools, background jobs, sub-agents, and messaging providers starting with Telegram.
 
@@ -118,4 +118,4 @@ cargo fmt -- --check
 
 ## License
 
-GPL-3.0. See [LICENSE](LICENSE).
+AGPL-3.0. See [LICENSE](LICENSE).

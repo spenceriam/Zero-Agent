@@ -11,7 +11,7 @@ The project should prove that a modern AI agent can be mostly Zero-native while 
 - Name: Zero-Agent
 - Repository: `spenceriam/Zero-Agent`
 - Local folder: `C:/Users/spenc/GitHub/zero-agent`
-- License: GPL-3.0
+- License: AGPL-3.0
 - Primary language: Zero
 - Temporary bridge language: Rust, only where needed
 - First interface targets: split-pane TUI and Telegram
@@ -51,7 +51,7 @@ Zero-Agent should help the user:
 - Local-only memory at first.
 - Destructive actions require permission.
 - Non-destructive actions should be fast and low-friction.
-- GPL-3.0 reciprocal open-source licensing.
+- AGPL-3.0 reciprocal open-source licensing.
 
 ## Must-have v0.1 capabilities
 

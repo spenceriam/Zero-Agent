@@ -2,7 +2,7 @@
   "package": {
     "name": "zero-agent",
     "version": "0.0.1",
-    "license": "GPL-3.0",
+    "license": "AGPL-3.0",
     "description": "Hermes-inspired daily-use agent built primarily in Zero"
   },
   "targets": {

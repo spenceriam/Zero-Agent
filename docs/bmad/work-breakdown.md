@@ -9,7 +9,7 @@ This project should be implemented in small slices that an AI coding agent can c
 Deliver:
 
 - README
-- GPL-3.0 license
+- AGPL-3.0 license
 - docs/spec pack
 - minimal Zero project manifest
 - empty source layout
